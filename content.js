@@ -1,14 +1,19 @@
 /*!
  * Citric — a lean native HTML5 player for YouTube.
  *
- * YouTube's player tends to fight back if you touch its internals, so instead
- * of emptying #movie_player we cover it with our own overlay and *pause* the
- * underlying player. The stock player stays mounted underneath (keeping the
- * layout and navigation intact) but the native <video> we render on top is what
- * the viewer actually sees and controls.
+ * Two ways to play, so the screen is never left black:
  *
- * If the stream we pick ever fails to load, the overlay is removed again and
- * the stock player is re-woken — playback keeps working no matter what.
+ *  1. Extraction path. When YouTube's response exposes a single muxed
+ *     (audio + video) progressive stream, we play it in our own native <video>
+ *     and pause the stock player — the fully lean mode Citric is about.
+ *
+ *  2. Adopt path. When only adaptive/ciphered streams exist (or ours 403s),
+ *     we steal the <video> element YouTube's own engine is already rendering
+ *     into and move it into our overlay, letting YouTube keep driving playback.
+ *     No stream is re-requested, so this cannot fail or go black.
+ *
+ * Either way the heavy player chrome sits underneath an opaque #citric-player
+ * overlay, next-sibling of #movie_player, so YouTube's UI can never cover us.
  */
 
 ("use strict");
@@ -19,23 +24,24 @@
   const NAVIGATE_EVENT = "yt-navigate-finish";
 
   // How long we are willing to wait for the underlying player to report a fresh
-  // response after a route change before leaving YouTube's player alone.
+  // response after a route change before relying on the adopted video.
   const RESPONSE_TIMEOUT_MS = 5000;
 
-  // If our media element has not produced a frame within this window we treat
-  // the stream as failed and hand control back to the stock player.
-  const STREAM_TIMEOUT_MS = 12000;
+  // How long each candidate stream gets before we move on to the next one.
+  const CANDIDATE_TIMEOUT_MS = 6000;
 
   const state = {
     videoId: null,
-    // Once a stream fails for a given video we back off rather than retry in a
-    // loop while the stock player plays it.
-    gaveUpOn: null,
+    // Bumped on every mount so orphaned stream timers can't act late.
+    gen: 0,
     // Playback position carried across navigations within the same video.
     resume: { videoId: null, time: 0, rate: 1 },
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
+
+  const log = (...args) => console.info("[citric]", ...args);
+  const warn = (...args) => console.warn("[citric]", ...args);
 
   const debounce = (fn, wait) => {
     let timer;
@@ -82,6 +88,9 @@
     return null;
   }
 
+  // Only return a response if it describes the video the URL currently names.
+  // Stale responses must never be trusted — that is how players go black on
+  // SPA navigation.
   function resolveResponse(player) {
     const videoId = currentVideoId();
     if (!videoId) return null;
@@ -95,67 +104,38 @@
     return null;
   }
 
-  // Pick a single muxed (audio + video) progressive stream we can hand straight
-  // to a <video> element. Adaptive formats require an external audio + video
-  // pairing layer (typically MSE), which is out of scope — if only adaptive
-  // streams are available we bail out and keep YouTube's player handling it.
-  function pickStream(response) {
-    if (!response.streamingData) return null;
+  // Every muxed (audio + video) progressive stream we could hand straight to a
+  // <video> element, best quality first. Adaptive formats need an external
+  // audio + video pairing layer (typically MSE), which is where we switch to
+  // the adopt path instead.
+  function pickStreams(response) {
+    if (!response.streamingData) return [];
 
-    const usable = (response.streamingData.formats || []).filter((format) => {
-      const mime = format.mimeType || "";
-      return format.url && format.contentLength && !mime.includes("text/");
-    });
-
-    if (usable.length === 0) return null;
-
-    return usable.reduce((best, format) =>
-      (format.bitrate || 0) > (best.bitrate || 0) ? format : best
-    );
-  }
-
-  function captionTracks(response) {
-    const renderer =
-      response.captions && response.captions.playerCaptionsTracklistRenderer;
-    return (renderer && renderer.captionTracks) || [];
+    const seen = new Set();
+    return (response.streamingData.formats || [])
+      .filter((format) => {
+        const mime = format.mimeType || "";
+        return format.url && format.contentLength && !mime.includes("text/");
+      })
+      .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))
+      .filter((format) => {
+        if (seen.has(format.itag)) return false;
+        seen.add(format.itag);
+        return true;
+      });
   }
 
   /* ------------------------------------------------------------------ *
-   * Stock player control
+   * The overlay
+   *
+   * Opaque, full-bleed, and always the next sibling of #movie_player with a
+   * near-max z-index, so nothing YouTube draws can paint above it.
    * ------------------------------------------------------------------ */
 
   function stockPlayer() {
     return $(PLAYER_SELECTOR);
   }
 
-  function pauseStock() {
-    const player = stockPlayer();
-    if (!player || typeof player.pauseVideo !== "function") return;
-    try {
-      player.pauseVideo();
-    } catch (_) {
-      /* player mid-load */
-    }
-  }
-
-  function resumeStock() {
-    const player = stockPlayer();
-    if (!player || typeof player.playVideo !== "function") return;
-    try {
-      player.playVideo();
-    } catch (_) {
-      /* player mid-load */
-    }
-  }
-
-  /* ------------------------------------------------------------------ *
-   * Native player overlay
-   * ------------------------------------------------------------------ */
-
-  // The overlay is placed as the *next sibling* of #movie_player, inside the
-  // same sized wrapper. Waiting until after #movie_player (and giving it a very
-  // high z-index) means YouTube's own UI can never paint above it, even when it
-  // re-enthuses and re-renders its internals underneath.
   function ensureOverlay() {
     const player = stockPlayer();
     if (!player) return null;
@@ -183,23 +163,16 @@
     if (overlay) overlay.remove();
   }
 
-  // Tracks YouTube timedtext into WebVTT so Safari's native caption picker can
-  // consume them. Tracks are exposed but never force-enabled — nobody likes
-  // captions switching themselves back on after a reload.
-  function buildCaptions(response, video) {
-    captionTracks(response).forEach((track) => {
-      const trackEl = document.createElement("track");
-      const url = new URL(track.baseUrl);
-      url.searchParams.set("fmt", "vtt");
-      trackEl.src = url.toString();
-      trackEl.kind = "captions";
-      trackEl.srclang = track.languageCode;
-      trackEl.label = track.name.simpleText || track.languageCode;
-      video.appendChild(trackEl);
-    });
+  function activeVideo() {
+    const overlay = $(OVERLAY_SELECTOR);
+    return overlay ? overlay.querySelector("video") : null;
   }
 
-  function buildVideo(stream, response) {
+  /* ------------------------------------------------------------------ *
+   * Extraction path
+   * ------------------------------------------------------------------ */
+
+  function buildVideo(stream) {
     const video = document.createElement("video");
 
     video.controls = true;
@@ -213,7 +186,6 @@
       "display:block;width:100%;height:100%;background:#000;";
 
     video.src = stream.url;
-    buildCaptions(response, video);
     return video;
   }
 
@@ -232,6 +204,119 @@
     if (resume.time > 0) video.currentTime = resume.time;
     if (resume.rate && resume.rate !== 1) video.playbackRate = resume.rate;
   }
+
+  function startExtraction(candidates) {
+    const videoId = currentVideoId();
+    if (!videoId) return false;
+
+    const gen = ++state.gen;
+    const overlay = ensureOverlay();
+    if (!overlay) return false;
+
+    const video = buildVideo(candidates[0]);
+    restorePlayback(video);
+    overlay.appendChild(video);
+    state.videoId = videoId;
+
+    // Try each candidate in turn; if they all fail, fall through to the adopt
+    // path so the viewer sees YouTube's own (still working) video.
+    let index = 0;
+    let settled = false;
+
+    const finish = (ok) => {
+      if (settled || gen !== state.gen) return;
+      settled = true;
+      window.clearTimeout(failTimer);
+      if (ok) {
+        state.mode = "extract";
+        log(`playing ${videoId} natively (itag ${video.currentItag || "?"})`);
+      } else {
+        warn("no muxed stream would play, adopting YouTube's element");
+        if (!adoptVideo()) removeOverlay();
+      }
+    };
+
+    const tryCandidate = () => {
+      if (gen !== state.gen) return;
+      if (index >= candidates.length) {
+        finish(false);
+        return;
+      }
+
+      const stream = candidates[index++];
+      video.currentItag = stream.itag;
+      video.src = stream.url;
+      try {
+        video.play().catch(() => {});
+      } catch (_) {
+        /* play needs a gesture on some pages; controls cover that */
+      }
+
+      failTimer = window.setTimeout(tryCandidate, CANDIDATE_TIMEOUT_MS);
+    };
+
+    let failTimer;
+    video.addEventListener("loadeddata", () => finish(true), { once: true });
+    video.addEventListener("playing", () => finish(true), { once: true });
+    video.addEventListener("error", tryCandidate, { once: true });
+
+    tryCandidate();
+    return true;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Adopt path
+   *
+   * Grab the media element YouTube's player is currently rendering into and
+   * park it inside the overlay. Reparenting does not interrupt playback, and
+   * YouTube keeps choosing streams and running its engine — we only move the
+   * pixels. Nothing here can 403.
+   * ------------------------------------------------------------------ */
+
+  function adoptVideo() {
+    const player = stockPlayer();
+    const overlay = ensureOverlay();
+    if (!player || !overlay) return false;
+
+    const ytVideo =
+      player.querySelector("video.html5-main-video, video.video-stream, video") ||
+      null;
+
+    if (!ytVideo) return false;
+    if (ytVideo === activeVideo()) {
+      styleStolenVideo(ytVideo);
+      return true;
+    }
+
+    overlay.appendChild(ytVideo);
+    styleStolenVideo(ytVideo);
+    state.videoId = currentVideoId();
+    state.mode = "adopt";
+
+    ytVideo.controls = true;
+    ytVideo.setAttribute("x-webkit-airplay", "allow");
+    ytVideo.playsInline = true;
+
+    attachKeyboardShortcuts();
+    log("adopted YouTube's own media element");
+    return true;
+  }
+
+  function styleStolenVideo(video) {
+    video.style.cssText = [
+      "position:absolute",
+      "top:0",
+      "left:0",
+      "width:100%",
+      "height:100%",
+      "object-fit:contain",
+      "background:#000",
+    ].join(";") + ";";
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Keyboard shortcuts
+   * ------------------------------------------------------------------ */
 
   function attachKeyboardShortcuts() {
     if (document.citricKeyboardBound) return;
@@ -275,116 +360,43 @@
     document.addEventListener("keydown", handler);
   }
 
-  function activeVideo() {
-    const overlay = $(OVERLAY_SELECTOR);
-    return overlay ? overlay.querySelector("video") : null;
-  }
-
-  // Mount the native player. Returns the <video>, or null if the stock player
-  // has no usable stream for the current URL.
-  function mountVideo(response) {
-    const stream = pickStream(response);
-    if (!stream) return null;
-
-    state.videoId = currentVideoId();
-
-    pauseStock();
-
-    const overlay = ensureOverlay();
-    if (!overlay) return null;
-
-    const video = buildVideo(stream, response);
-    restorePlayback(video);
-    overlay.replaceChildren(video);
-
-    attachKeyboardShortcuts();
-
-    // If the selected stream never comes up, back out cleanly and hand control
-    // to the stock player rather than leaving a permanent black frame.
-    let fired = false;
-    const failTimer = window.setTimeout(() => {
-      if (fired) return;
-      fired = true;
-      fallbackToStock();
-    }, STREAM_TIMEOUT_MS);
-
-    const clearFail = () => {
-      if (fired) return;
-      fired = true;
-      window.clearTimeout(failTimer);
-    };
-
-    video.addEventListener("loadeddata", clearFail, { once: true });
-    video.addEventListener("playing", clearFail, { once: true });
-    video.addEventListener("error", () => {
-      clearFail();
-      fallbackToStock();
-    });
-
-    return video;
-  }
-
-  function fallbackToStock() {
-    state.gaveUpOn = currentVideoId();
-    removeOverlay();
-    resumeStock();
-    console.warn("[citric] stream failed, handed back to the stock player");
-  }
-
   /* ------------------------------------------------------------------ *
    * Boot and SPA navigation
    *
    * Nothing under document_start is guaranteed to exist yet, so we watch for
-   * the player container to appear. YouTube reuses the same container across
-   * watch pages, so route changes are handled by tearing down our overlay and
-   * re-mounting once the underlying player reports the new video.
+   * the player container to appear. YouTube reuses the container across watch
+   * pages; we simply re-run the mount on every navigation because the adopt
+   * path is idempotent and the extraction path only acts on a response that
+   * matches the current URL.
    * ------------------------------------------------------------------ */
 
-  const rebuildForNavigation = debounce(() => {
-    const video = activeVideo();
-    rememberPlayback(video);
-
+  const mount = debounce(() => {
     const player = stockPlayer();
     if (!player) {
       removeOverlay();
       return;
     }
+    if (!currentVideoId()) {
+      removeOverlay();
+      return;
+    }
 
+    // Fresh navigation to a different video: adopt first (YouTube's element is
+    // already correct), then only consider extraction for a confirmed response.
     const videoId = currentVideoId();
-    if (state.gaveUpOn !== videoId) state.gaveUpOn = null;
+    const response = resolveResponse(player);
+    const candidates = response ? pickStreams(response) : [];
 
-    // Poll the underlying player until it reports the video the URL now points
-    // to, then mount a fresh native element. If the player never catches up we
-    // simply stop and let YouTube's own player take over seamlessly.
-    const deadline = Date.now() + RESPONSE_TIMEOUT_MS;
-    const poll = () => {
-      const videoId = currentVideoId();
-      if (!videoId) {
-        removeOverlay();
-        return;
-      }
-
-      const response = resolveResponse(player);
-      if (response && response.videoDetails.videoId === videoId) {
-        state.videoId = null; // fresh mount, don't carry stale resume state
-        mountVideo(response);
-        return;
-      }
-
-      if (Date.now() > deadline) {
-        removeOverlay();
-        return;
-      }
-      window.setTimeout(poll, 150);
-    };
-
-    poll();
+    if (candidates.length && (!state.videoId || state.videoId === videoId)) {
+      startExtraction(candidates);
+    } else if (!adoptVideo()) {
+      removeOverlay();
+    }
   }, 300);
 
   function start() {
     const onFirstPlayer = () => {
-      pauseStock();
-      rebuildForNavigation();
+      mount();
     };
 
     const existing = $(PLAYER_SELECTOR);
@@ -402,43 +414,42 @@
       });
     }
 
-    // Primary navigation signal: fires after YouTube swaps watch content.
-    // It is dispatched on <window> (some pages relay it to <document>), so
-    // listen on both; the handler is idempotent so a double fire is harmless.
-    const onNavigate = () => {
-      rememberPlayback(activeVideo());
-      state.videoId = null;
-      rebuildForNavigation();
-    };
-    window.addEventListener(NAVIGATE_EVENT, onNavigate);
-    document.addEventListener(NAVIGATE_EVENT, onNavigate);
+    // Primary navigation signal: fires after YouTube swaps watch content. It
+    // is dispatched on <window> (some pages relay it to <document>), so listen
+    // on both; mount() is idempotent so a double fire is harmless.
+    window.addEventListener(NAVIGATE_EVENT, mount);
+    document.addEventListener(NAVIGATE_EVENT, mount);
 
     // Backstop observer: YouTube occasionally re-mounts or clears the player
-    // container without emitting a navigation event (embed re-sizes, live
-    // reloads, canonical-URL swaps). Reconcile the overlay whenever the player
-    // container above it is touched.
+    // container without a navigation event (embed resizes, live reloads).
+    // When the container is touched, make sure the overlay still holds a video
+    // that matches the current URL.
     const reconcile = debounce(() => {
       const player = stockPlayer();
       const overlay = $(OVERLAY_SELECTOR);
 
-      if (!player) {
+      if (!player || !currentVideoId()) {
         removeOverlay();
         return;
       }
 
-      if (!currentVideoId()) {
-        removeOverlay();
+      const video = player.querySelector(
+        "video.html5-main-video, video.video-stream, video"
+      );
+      const ours = activeVideo();
+
+      // YouTube re-created its media element (fresh navigation or quality
+      // reset): if we are in adopt mode, swap the new one in.
+      if (video && ours && video !== ours && state.mode === "adopt") {
+        overlay.appendChild(video);
+        styleStolenVideo(video);
+        attachKeyboardShortcuts();
         return;
       }
 
-      if (overlay && overlay.previousElementSibling !== player) {
-        if (overlay.isConnected) overlay.remove();
-        rebuildForNavigation();
-        return;
-      }
-
-      if (!overlay && state.gaveUpOn !== currentVideoId()) {
-        rebuildForNavigation();
+      // Nothing mounted, or YouTube replaced our overlay's contents — remount.
+      if (!ours || !overlay.contains(ours)) {
+        mount();
       }
     }, 400);
 
