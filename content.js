@@ -477,6 +477,23 @@
     if (goFullscreen) goFullscreen.call(holder);
   }
 
+  // Toggle play/pause without fighting the engine that owns the media element.
+  // In adopt mode YouTube still drives its video, so nudge its player API to
+  // keep internal state honest — otherwise a scripted pause is instantly
+  // overridden when its engine decides it should still be playing. On the
+  // extraction path (our own element) a plain element call is all it takes.
+  function togglePlayback(video) {
+    if (!video) return;
+    const player = stockPlayer();
+    if (state.mode === "adopt" && player && player.pauseVideo && player.playVideo) {
+      if (video.paused) player.playVideo();
+      else player.pauseVideo();
+      return;
+    }
+    if (video.paused) video.play().catch(() => {});
+    else video.pause();
+  }
+
   function updateBarState(video) {
     if (!controlsBar) return;
     const playBtn = controlsBar.querySelector('[data-action="play"]');
@@ -580,8 +597,7 @@
       if (!btn) return;
       switch (btn.dataset.action) {
         case "play":
-          if (videoNow.paused) videoNow.play();
-          else videoNow.pause();
+          togglePlayback(videoNow);
           break;
         case "back":
           videoNow.currentTime = Math.max(0, videoNow.currentTime - 10);
@@ -635,8 +651,7 @@
       switch (event.key) {
         case "k":
         case "K":
-          if (video.paused) video.play();
-          else video.pause();
+          togglePlayback(video);
           break;
         case "m":
         case "M":
@@ -655,8 +670,7 @@
           toggleFullscreen(video);
           break;
         case " ":
-          if (video.paused) video.play();
-          else video.pause();
+          togglePlayback(video);
           event.preventDefault();
           break;
       }
@@ -666,24 +680,34 @@
   }
 
   // Clicking anywhere on the picture toggles play/pause, like clicking on
-  // YouTube. This is born on the document in the capture phase so it also
-  // catches clicks while the media element is presented fullscreen — Safari
-  // can swallow clicks on the element itself by then, but the document always
-  // sees them first. The control bar is excluded so its buttons stay safe.
+  // YouTube. Bound on the document in the capture phase, so the gesture is seen
+  // even when the media element is presented fullscreen and Safari retargets or
+  // chews the event before it reaches the element — the document always runs
+  // capture first. pointerup and click both fire for a single physical tap, so
+  // a short lock swallows the echo. The control bar is excluded entirely.
   if (!window.__citricClickWired) {
     window.__citricClickWired = true;
-    document.addEventListener(
-      "click",
-      (event) => {
-        const video = activeVideo();
-        if (!video || !event.target) return;
-        if (event.target !== video && !video.contains(event.target)) return;
-        if (event.target.closest && event.target.closest(".citric-bar")) return;
-        if (video.paused) video.play().catch(() => {});
-        else video.pause();
-      },
-      true
-    );
+    let lastToggleAt = 0;
+    const toggle = (event) => {
+      const video = activeVideo();
+      if (!video || !event.target) return;
+
+      const fsEl =
+        document.webkitFullscreenElement || document.fullscreenElement || null;
+      const onVideo = event.target === video || video.contains(event.target);
+      const onFullscreen =
+        fsEl && (event.target === fsEl || fsEl.contains(event.target));
+      if (!onVideo && !onFullscreen) return;
+
+      if (event.target.closest && event.target.closest(".citric-bar")) return;
+
+      const now = performance.now();
+      if (now - lastToggleAt < 400) return;
+      lastToggleAt = now;
+      togglePlayback(video);
+    };
+    document.addEventListener("pointerup", toggle, true);
+    document.addEventListener("click", toggle, true);
   }
 
   /* ------------------------------------------------------------------ *
