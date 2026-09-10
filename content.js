@@ -442,9 +442,9 @@
   }
 
   // Once-per-overlay wiring: show the bar on movement, and toggle play/pause
-  // when the cursor enters the middle of the video — like clicking on YouTube,
-  // but without the click. The trigger box only covers the central area, so
-  // reaching for the control bar below never toggles playback by accident.
+  // whenever the cursor lands on the video — like clicking on YouTube, but
+  // without the click. The trigger fires once per entry so passing over it
+  // never flips playback back and forth.
   function wireOverlay(overlay) {
     if (wiredOverlays.has(overlay)) return;
     wiredOverlays.add(overlay);
@@ -457,29 +457,21 @@
       }
     });
 
-    const BOX = { top: 0.2, right: 0.82, bottom: 0.8, left: 0.18 };
-    let inBox = false;
-
-    overlay.addEventListener("mousemove", (event) => {
-      const rect = overlay.getBoundingClientRect();
-      const w = rect.width || 1;
-      const h = rect.height || 1;
-      const x = event.clientX - rect.left;
-      const y = event.clientY - rect.top;
-
-      const hit =
-        x >= BOX.left * w &&
-        x <= BOX.right * w &&
-        y >= BOX.top * h &&
-        y <= BOX.bottom * h;
-      if (hit === inBox) return;
-      inBox = hit;
-      if (!hit) return;
-
+    // Moving the cursor onto the video toggles play/pause, like clicking on
+    // YouTube — anywhere on the picture, not just the middle. It fires once per
+    // entry so a wiggle inside the frame never flips playback back and forth.
+    let pointerInside = false;
+    overlay.addEventListener("pointerenter", () => {
+      if (pointerInside) return;
+      pointerInside = true;
       const video = activeVideo();
       if (!video) return;
       if (video.paused) video.play().catch(() => {});
       else video.pause();
+    });
+
+    overlay.addEventListener("pointerleave", () => {
+      pointerInside = false;
     });
   }
 
