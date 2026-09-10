@@ -368,6 +368,9 @@
       "#citric-player .citric-spinner:before{content:'';width:42px;height:42px;border-radius:50%;",
       "border:3px solid rgba(255,255,255,.25);border-top-color:#fff;animation:citric-spin .8s linear infinite;}",
       "@keyframes citric-spin{to{transform:rotate(360deg)}}",
+      "#citric-player:fullscreen,#citric-player:-webkit-full-screen{position:fixed!important;",
+      "inset:0!important;width:100vw!important;height:100vh!important;",
+      "max-width:none!important;max-height:none!important;}",
     ].join("");
     document.documentElement.appendChild(style);
   }
