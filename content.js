@@ -368,9 +368,16 @@
       "#citric-player .citric-spinner:before{content:'';width:42px;height:42px;border-radius:50%;",
       "border:3px solid rgba(255,255,255,.25);border-top-color:#fff;animation:citric-spin .8s linear infinite;}",
       "@keyframes citric-spin{to{transform:rotate(360deg)}}",
-      "#citric-player:fullscreen,#citric-player:-webkit-full-screen{position:fixed!important;",
-      "inset:0!important;width:100vw!important;height:100vh!important;",
-      "max-width:none!important;max-height:none!important;}",
+      // When WebKit enters fullscreen it keeps the element's own laid-out box,
+      // centered on a black screen, instead of stretching it. Hammer the player
+      // into every corner with percentage sizing — vw/vh units resolve against
+      // the pre-fullscreen layout viewport here and leave black strips on the
+      // right and bottom (a long-standing Safari quirk).
+      "#citric-player:fullscreen,#citric-player:-webkit-full-screen{",
+      "position:fixed!important;top:0!important;left:0!important;",
+      "right:0!important;bottom:0!important;width:100%!important;height:100%!important;",
+      "margin:0!important;min-width:0!important;max-width:none!important;",
+      "min-height:0!important;max-height:none!important;box-sizing:border-box!important;",
     ].join("");
     document.documentElement.appendChild(style);
   }
@@ -497,8 +504,9 @@
       const fsEl = document.webkitFullscreenElement || document.fullscreenElement;
       if (fsEl === overlay) {
         overlay.style.cssText =
-          "position:fixed;top:0;left:0;width:100vw;height:100vh;" +
-          "max-width:none;max-height:none;z-index:2147483000;background:#000;";
+          "position:fixed;top:0;left:0;right:0;bottom:0;" +
+          "width:auto;height:auto;max-width:none;max-height:none;" +
+          "z-index:2147483000;background:#000;";
       } else if (!fsEl) {
         overlay.style.cssText =
           "position:absolute;inset:0;z-index:2147483000;background:#000;";
