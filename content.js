@@ -243,6 +243,8 @@
         return;
       }
 
+      window.clearTimeout(failTimer);
+
       const stream = candidates[index++];
       video.currentItag = stream.itag;
       video.src = stream.url;
