@@ -441,9 +441,9 @@
     }, 2600);
   }
 
-  // Once-per-overlay wiring: show the bar on movement, and toggle play/pause on
-  // click anywhere on the picture — like clicking on YouTube, minus the rest of
-  // their chrome. The control bar is exempt so its buttons stay flick-free.
+  // Once-per-overlay wiring: show the bar on movement. Play/pause toggling on
+  // click is attached to the <video> element itself (see bindControls) so it
+  // also works when the video is presented fullscreen.
   function wireOverlay(overlay) {
     if (wiredOverlays.has(overlay)) return;
     wiredOverlays.add(overlay);
@@ -454,16 +454,6 @@
       if (!scrubbing && (!video || !video.paused)) {
         controlsBar.classList.remove("visible");
       }
-    });
-
-    // Clicking anywhere on the picture toggles play/pause, like YouTube — but
-    // the control-bar buttons are left to their own handlers below.
-    overlay.addEventListener("click", (event) => {
-      if (event.target.closest(".citric-bar")) return;
-      const video = activeVideo();
-      if (!video) return;
-      if (video.paused) video.play().catch(() => {});
-      else video.pause();
     });
   }
 
@@ -521,6 +511,21 @@
       showBar();
     });
     video.addEventListener("volumechange", () => updateBarState(video));
+
+    // Clicking anywhere on the picture toggles play/pause, like YouTube. This
+    // lives on the video element — not the overlay — so it keeps working when
+    // the video fills the screen in fullscreen mode.
+    video.addEventListener("click", () => {
+      const current = activeVideo();
+      if (!current) return;
+      if (current.paused) current.play().catch(() => {});
+      else current.pause();
+    });
+    // YouTube's engine likes to re-apply pointer-events:none to its own video;
+    // never let that swallow clicks meant for the picture.
+    video.addEventListener("webkitbeginfullscreen", () => {
+      video.style.pointerEvents = "auto";
+    });
 
     video.addEventListener("timeupdate", () => {
       if (scrubbing) return;
@@ -592,10 +597,12 @@
           }
           break;
         case "fullscreen":
-          if (videoNow.webkitEnterFullscreen) videoNow.webkitEnterFullscreen();
-          else if (videoNow.requestFullscreen) {
-            const holder = videoNow.parentElement;
+          if (document.fullscreenElement) {
+            document.exitFullscreen();
+          } else {
+            const holder = videoNow.closest("#citric-player");
             if (holder && holder.requestFullscreen) holder.requestFullscreen();
+            else if (videoNow.webkitEnterFullscreen) videoNow.webkitEnterFullscreen();
           }
           break;
       }
@@ -640,10 +647,14 @@
           break;
         case "f":
         case "F":
-          if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
-          else if (video.requestFullscreen) {
-            const holder = video.parentElement;
+          if (document.fullscreenElement) {
+            document.exitFullscreen();
+          } else {
+            const holder = video.parentElement && video.parentElement.closest
+              ? video.parentElement.closest("#citric-player")
+              : null;
             if (holder && holder.requestFullscreen) holder.requestFullscreen();
+            else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
           }
           break;
         case " ":
