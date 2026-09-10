@@ -441,9 +441,9 @@
     }, 2600);
   }
 
-  // Once-per-overlay wiring: show the bar on movement. Play/pause toggling on
-  // click is attached to the <video> element itself (see bindControls) so it
-  // also works when the video is presented fullscreen.
+  // Once-per-overlay wiring: show the bar on movement. Click-to-toggle lives on
+  // the document in the capture phase (below), so it works both inline and when
+  // the overlay is fullscreened.
   function wireOverlay(overlay) {
     if (wiredOverlays.has(overlay)) return;
     wiredOverlays.add(overlay);
@@ -464,17 +464,18 @@
       else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
       return;
     }
-    // The old reliable path: present the media element itself fullscreen.
-    // Safari scales it to fill each dimension, so there are no side bezels.
-    if (video.webkitEnterFullscreen) {
-      video.webkitEnterFullscreen();
-      return;
-    }
-    // Fallback: fullscreen the overlay (standard API or WebKit prefix).
+    // Fullscreen the whole player overlay, not the media element. The DOM stays
+    // intact this way, so clicks and the control bar keep working fullscreen —
+    // entering Safari's native media presentation would swallow those events.
     const holder = video.closest("#citric-player");
     const goFullscreen = holder
       && (holder.webkitRequestFullscreen || holder.requestFullscreen);
-    if (goFullscreen) goFullscreen.call(holder);
+    if (goFullscreen) {
+      goFullscreen.call(holder);
+      return;
+    }
+    // Ancient webkit only: present the media element itself.
+    if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
   }
 
   // Toggle play/pause without fighting the engine that owns the media element.
@@ -694,10 +695,12 @@
 
       const fsEl =
         document.webkitFullscreenElement || document.fullscreenElement || null;
+      const overlay = document.getElementById("citric-player");
       const onVideo = event.target === video || video.contains(event.target);
       const onFullscreen =
         fsEl && (event.target === fsEl || fsEl.contains(event.target));
-      if (!onVideo && !onFullscreen) return;
+      const onOverlay = overlay && overlay.contains(event.target);
+      if (!onVideo && !onFullscreen && !onOverlay) return;
 
       if (event.target.closest && event.target.closest(".citric-bar")) return;
 
