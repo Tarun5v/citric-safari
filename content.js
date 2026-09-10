@@ -457,6 +457,26 @@
     });
   }
 
+  function toggleFullscreen(video) {
+    // Exit first if a fullscreen view is already up.
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+      return;
+    }
+    // The old reliable path: present the media element itself fullscreen.
+    // Safari scales it to fill each dimension, so there are no side bezels.
+    if (video.webkitEnterFullscreen) {
+      video.webkitEnterFullscreen();
+      return;
+    }
+    // Fallback: fullscreen the overlay (standard API or WebKit prefix).
+    const holder = video.closest("#citric-player");
+    const goFullscreen = holder
+      && (holder.webkitRequestFullscreen || holder.requestFullscreen);
+    if (goFullscreen) goFullscreen.call(holder);
+  }
+
   function updateBarState(video) {
     if (!controlsBar) return;
     const playBtn = controlsBar.querySelector('[data-action="play"]');
@@ -597,13 +617,7 @@
           }
           break;
         case "fullscreen":
-          if (document.fullscreenElement) {
-            document.exitFullscreen();
-          } else {
-            const holder = videoNow.closest("#citric-player");
-            if (holder && holder.requestFullscreen) holder.requestFullscreen();
-            else if (videoNow.webkitEnterFullscreen) videoNow.webkitEnterFullscreen();
-          }
+          toggleFullscreen(videoNow);
           break;
       }
       showBar();
@@ -647,15 +661,7 @@
           break;
         case "f":
         case "F":
-          if (document.fullscreenElement) {
-            document.exitFullscreen();
-          } else {
-            const holder = video.parentElement && video.parentElement.closest
-              ? video.parentElement.closest("#citric-player")
-              : null;
-            if (holder && holder.requestFullscreen) holder.requestFullscreen();
-            else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
-          }
+          toggleFullscreen(video);
           break;
         case " ":
           if (video.paused) video.play();
