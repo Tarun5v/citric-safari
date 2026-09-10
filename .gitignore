@@ -1,0 +1,24 @@
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+.AppleDouble
+.LSOverride
+
+# Xcode / Safari extension build artifacts
+*.xcuserstate
+xcuserdata/
+build/
+DerivedData/
+
+# Node (if tooling is added later)
+node_modules/
+npm-debug.log*
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
