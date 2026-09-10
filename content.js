@@ -163,6 +163,15 @@
     if (overlay) overlay.remove();
   }
 
+  // Move the video that owns the screen into the overlay, dropping any previous
+  // media element so two videos never stack on top of each other.
+  function reparentVideo(overlay, video) {
+    overlay.querySelectorAll("video").forEach((old) => {
+      if (old !== video) old.remove();
+    });
+    overlay.appendChild(video);
+  }
+
   function activeVideo() {
     const overlay = $(OVERLAY_SELECTOR);
     return overlay ? overlay.querySelector("video") : null;
@@ -175,7 +184,7 @@
   function buildVideo(stream) {
     const video = document.createElement("video");
 
-    video.controls = true;
+    video.controls = false;
     video.autoplay = true;
     video.preload = "auto";
     video.playsInline = true;
@@ -215,7 +224,8 @@
 
     const video = buildVideo(candidates[0]);
     restorePlayback(video);
-    overlay.appendChild(video);
+    reparentVideo(overlay, video);
+    bindControls(overlay);
     state.videoId = videoId;
 
     // Try each candidate in turn; if they all fail, fall through to the adopt
@@ -290,15 +300,17 @@
       return true;
     }
 
-    overlay.appendChild(ytVideo);
+    reparentVideo(overlay, ytVideo);
     styleStolenVideo(ytVideo);
     state.videoId = currentVideoId();
     state.mode = "adopt";
 
-    ytVideo.controls = true;
+    ytVideo.controls = false;
+    ytVideo.removeAttribute("controls");
     ytVideo.setAttribute("x-webkit-airplay", "allow");
     ytVideo.playsInline = true;
 
+    bindControls(overlay);
     attachKeyboardShortcuts();
     log("adopted YouTube's own media element");
     return true;
@@ -314,6 +326,256 @@
       "object-fit:contain",
       "background:#000",
     ].join(";") + ";";
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Control bar
+   *
+   * Safari's native video controls can't be relied on here (YouTube strips the
+   * controls attribute off its own element, and autoplaying inline videos hide
+   * the built-in bar), so Citric paints a small bar of its own that fades in on
+   * hover and covers play/pause, seeking, volume, PiP, AirPlay and fullscreen.
+   * ------------------------------------------------------------------ */
+
+  function injectStyles() {
+    if (document.getElementById("citric-style")) return;
+    const style = document.createElement("style");
+    style.id = "citric-style";
+    style.textContent = [
+      "#citric-player .citric-bar{position:absolute;left:0;right:0;bottom:0;",
+      "height:52px;display:flex;align-items:center;gap:10px;padding:24px 14px 8px;",
+      "box-sizing:border-box;background:linear-gradient(180deg,rgba(0,0,0,0),rgba(0,0,0,.72));",
+      "opacity:0;transition:opacity .18s ease;pointer-events:none;z-index:5;}",
+      "#citric-player .citric-bar.visible{opacity:1;}",
+      "#citric-player .citric-controls{display:flex;align-items:center;gap:2px;pointer-events:auto;}",
+      "#citric-player .citric-btn{width:34px;height:34px;display:inline-flex;align-items:center;",
+      "justify-content:center;background:transparent;border:0;color:#fff;border-radius:6px;",
+      "cursor:pointer;padding:0;}",
+      "#citric-player .citric-btn:hover{background:rgba(255,255,255,.16);}",
+      "#citric-player .citric-btn svg{width:20px;height:20px;fill:currentColor;}",
+      "#citric-player .citric-btn.stroke svg{fill:none;stroke:currentColor;stroke-width:2;}",
+      "#citric-player .citric-time{color:#fff;font:12px/1 -apple-system,system-ui,sans-serif;",
+      "margin:0 4px;white-space:nowrap;pointer-events:none;}",
+      "#citric-player .citric-slider{-webkit-appearance:none;appearance:none;height:4px;",
+      "border-radius:2px;background:rgba(255,255,255,.35);outline:none;cursor:pointer;pointer-events:auto;}",
+      "#citric-player .citric-slider::-webkit-slider-thumb{-webkit-appearance:none;",
+      "width:12px;height:12px;border-radius:50%;background:#fff;}",
+      "#citric-player .citric-seek{flex:1 1 auto;min-width:60px;}",
+      "#citric-player .citric-vol{width:64px;}",
+      "#citric-player .citric-spinner{position:absolute;inset:0;display:none;align-items:center;",
+      "justify-content:center;pointer-events:none;z-index:4;}",
+      "#citric-player .citric-spinner.on{display:flex;}",
+      "#citric-player .citric-spinner:before{content:'';width:42px;height:42px;border-radius:50%;",
+      "border:3px solid rgba(255,255,255,.25);border-top-color:#fff;animation:citric-spin .8s linear infinite;}",
+      "@keyframes citric-spin{to{transform:rotate(360deg)}}",
+    ].join("");
+    document.documentElement.appendChild(style);
+  }
+
+  const ICONS = {
+    play:
+      '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>',
+    pause:
+      '<svg viewBox="0 0 24 24"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>',
+    back:
+      '<svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7z"/></svg>',
+    forward:
+      '<svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7z"/></svg>',
+    muted:
+      '<svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4z"/></svg>',
+    quiet:
+      '<svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M17 10a4 4 0 0 1 0 4"/></svg>',
+    loud:
+      '<svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M17 10a4 4 0 0 1 0 4"/><path d="M19.5 7.5a8 8 0 0 1 0 9"/></svg>',
+    pip:
+      '<svg viewBox="0 0 24 24" class="stroke"><path d="M4 5h16a0 0 0 0 1 0 0v9a0 0 0 0 1 0 0h-9a0 0 0 0 0 0 0"/></svg>',
+    airplay:
+      '<svg viewBox="0 0 24 24"><path d="M4 5h16v10h-7l-2-2.5L9 15H4V5z"/><path d="M12 15l4 5H8z"/></svg>',
+    fullscreen:
+      '<svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>',
+  };
+
+  const fmtTime = (sec) => {
+    if (!isFinite(sec)) return "0:00";
+    const total = Math.floor(sec);
+    return String(Math.floor(total / 60)) + ":" + String(total % 60).padStart(2, "0");
+  };
+
+  function buildBar() {
+    const bar = document.createElement("div");
+    bar.className = "citric-bar";
+    bar.innerHTML = [
+      '<div class="citric-controls">',
+      '<button class="citric-btn" data-action="play" title="Play / Pause">' + ICONS.play + "</button>",
+      '<button class="citric-btn" data-action="back" title="Back 10 seconds">' + ICONS.back + "</button>",
+      '<button class="citric-btn" data-action="forward" title="Forward 10 seconds">' + ICONS.forward + "</button>",
+      "</div>",
+      '<input class="citric-slider citric-seek" type="range" min="0" max="0" step="0.1" value="0" data-action="seek">',
+      '<span class="citric-time">0:00 / 0:00</span>',
+      '<div class="citric-controls">',
+      '<button class="citric-btn" data-action="mute" title="Mute">' + ICONS.loud + "</button>",
+      '<input class="citric-slider citric-vol" type="range" min="0" max="1" step="0.05" value="1" data-action="volume">',
+      '<button class="citric-btn" data-action="pip" title="Picture in Picture">' + ICONS.pip + "</button>",
+      '<button class="citric-btn" data-action="airplay" title="AirPlay">' + ICONS.airplay + "</button>",
+      '<button class="citric-btn" data-action="fullscreen" title="Fullscreen">' + ICONS.fullscreen + "</button>",
+      "</div>",
+    ].join("");
+    return bar;
+  }
+
+  let controlsBar = null;
+  let controlsVideo = null;
+
+  function updateBarState(video) {
+    if (!controlsBar) return;
+    const playBtn = controlsBar.querySelector('[data-action="play"]');
+    const muteBtn = controlsBar.querySelector('[data-action="mute"]');
+    const vol = controlsBar.querySelector('[data-action="volume"]');
+
+    if (video.paused) {
+      playBtn.innerHTML = ICONS.play;
+      controlsBar.classList.add("visible");
+    } else {
+      playBtn.innerHTML = ICONS.pause;
+    }
+
+    muteBtn.innerHTML = video.muted || video.volume === 0 ? ICONS.muted : video.volume < 0.5 ? ICONS.quiet : ICONS.loud;
+    if (document.activeElement !== vol) vol.value = String(video.muted ? 0 : video.volume);
+  }
+
+  function bindControls(overlay) {
+    injectStyles();
+    if (controlsBar && controlsBar.parentElement === overlay) {
+      // keep existing bar
+    } else {
+      controlsBar = buildBar();
+      overlay.append(controlsBar);
+      overlay.insertAdjacentHTML("beforeend", '<div class="citric-spinner"></div>');
+    }
+
+    const video = overlay.querySelector("video");
+    if (!video) return;
+
+    if (controlsVideo === video) return;
+    controlsVideo = video;
+
+    controlsBar.querySelector('[data-action="pip"]').hidden =
+      typeof video.webkitSetPresentationMode !== "function";
+    controlsBar.querySelector('[data-action="airplay"]').hidden =
+      typeof video.webkitShowPlaybackTargetPicker !== "function";
+
+    const seek = controlsBar.querySelector('[data-action="seek"]');
+    const vol = controlsBar.querySelector('[data-action="volume"]');
+    const time = controlsBar.querySelector(".citric-time");
+    const spinner = overlay.querySelector(".citric-spinner");
+
+    let hidingTimer;
+    let scrubbing = false;
+
+    const showBar = () => {
+      controlsBar.classList.add("visible");
+      window.clearTimeout(hidingTimer);
+      if (!video.paused) {
+        hidingTimer = window.setTimeout(() => {
+          if (!scrubbing) controlsBar.classList.remove("visible");
+        }, 2600);
+      }
+    };
+
+    overlay.addEventListener("mousemove", showBar);
+    overlay.addEventListener("mouseleave", () => {
+      if (!video.paused && !scrubbing) controlsBar.classList.remove("visible");
+    });
+
+    video.addEventListener("play", () => {
+      updateBarState(video);
+      showBar();
+    });
+    video.addEventListener("pause", () => {
+      updateBarState(video);
+      showBar();
+    });
+    video.addEventListener("volumechange", () => updateBarState(video));
+
+    video.addEventListener("timeupdate", () => {
+      if (scrubbing) return;
+      if (isFinite(video.duration)) {
+        seek.max = String(video.duration);
+        seek.value = String(video.currentTime);
+      }
+      time.textContent =
+        fmtTime(video.currentTime) + " / " + fmtTime(video.duration);
+    });
+
+    video.addEventListener("loadedmetadata", () => {
+      seek.max = String(video.duration || 0);
+      time.textContent = "0:00 / " + fmtTime(video.duration);
+    });
+
+    video.addEventListener("waiting", () => spinner.classList.add("on"));
+    video.addEventListener("playing", () => spinner.classList.remove("on"));
+    video.addEventListener("canplay", () => spinner.classList.remove("on"));
+
+    seek.addEventListener("input", () => {
+      scrubbing = true;
+      video.currentTime = parseFloat(seek.value);
+      time.textContent = fmtTime(video.currentTime) + " / " + fmtTime(video.duration);
+    });
+    seek.addEventListener("change", () => {
+      scrubbing = false;
+      showBar();
+    });
+
+    vol.addEventListener("input", () => {
+      video.volume = parseFloat(vol.value);
+      video.muted = video.volume === 0;
+      updateBarState(video);
+    });
+
+    controlsBar.addEventListener("click", (event) => {
+      const videoNow = activeVideo();
+      if (!videoNow) return;
+      const btn = event.target.closest("[data-action]");
+      if (!btn) return;
+      switch (btn.dataset.action) {
+        case "play":
+          if (videoNow.paused) videoNow.play();
+          else videoNow.pause();
+          break;
+        case "back":
+          videoNow.currentTime = Math.max(0, videoNow.currentTime - 10);
+          break;
+        case "forward":
+          videoNow.currentTime = Math.min(videoNow.duration || 0, videoNow.currentTime + 10);
+          break;
+        case "mute":
+          videoNow.muted = !videoNow.muted;
+          updateBarState(videoNow);
+          break;
+        case "pip":
+          if (videoNow.webkitSetPresentationMode) {
+            videoNow.webkitSetPresentationMode(
+              videoNow.webkitPresentationMode === "picture-in-picture"
+                ? "inline"
+                : "picture-in-picture"
+            );
+          }
+          break;
+        case "airplay":
+          if (videoNow.webkitShowPlaybackTargetPicker) {
+            videoNow.webkitShowPlaybackTargetPicker();
+          }
+          break;
+        case "fullscreen":
+          if (videoNow.webkitEnterFullscreen) videoNow.webkitEnterFullscreen();
+          else if (videoNow.requestFullscreen) {
+            const holder = videoNow.parentElement;
+            if (holder && holder.requestFullscreen) holder.requestFullscreen();
+          }
+          break;
+      }
+      showBar();
+    });
   }
 
   /* ------------------------------------------------------------------ *
@@ -350,6 +612,14 @@
         case "l":
         case "L":
           video.currentTime = Math.min(video.duration || 0, video.currentTime + 10);
+          break;
+        case "f":
+        case "F":
+          if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
+          else if (video.requestFullscreen) {
+            const holder = video.parentElement;
+            if (holder && holder.requestFullscreen) holder.requestFullscreen();
+          }
           break;
         case " ":
           if (video.paused) video.play();
@@ -443,8 +713,9 @@
       // YouTube re-created its media element (fresh navigation or quality
       // reset): if we are in adopt mode, swap the new one in.
       if (video && ours && video !== ours && state.mode === "adopt") {
-        overlay.appendChild(video);
+        reparentVideo(overlay, video);
         styleStolenVideo(video);
+        bindControls(overlay);
         attachKeyboardShortcuts();
         return;
       }
