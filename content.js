@@ -441,10 +441,9 @@
     }, 2600);
   }
 
-  // Once-per-overlay wiring: show the bar on movement, and toggle play/pause
-  // whenever the cursor lands on the video — like clicking on YouTube, but
-  // without the click. The trigger fires once per entry so passing over it
-  // never flips playback back and forth.
+  // Once-per-overlay wiring: show the bar on movement, and toggle play/pause on
+  // click anywhere on the picture — like clicking on YouTube, minus the rest of
+  // their chrome. The control bar is exempt so its buttons stay flick-free.
   function wireOverlay(overlay) {
     if (wiredOverlays.has(overlay)) return;
     wiredOverlays.add(overlay);
@@ -457,21 +456,14 @@
       }
     });
 
-    // Moving the cursor onto the video toggles play/pause, like clicking on
-    // YouTube — anywhere on the picture, not just the middle. It fires once per
-    // entry so a wiggle inside the frame never flips playback back and forth.
-    let pointerInside = false;
-    overlay.addEventListener("pointerenter", () => {
-      if (pointerInside) return;
-      pointerInside = true;
+    // Clicking anywhere on the picture toggles play/pause, like YouTube — but
+    // the control-bar buttons are left to their own handlers below.
+    overlay.addEventListener("click", (event) => {
+      if (event.target.closest(".citric-bar")) return;
       const video = activeVideo();
       if (!video) return;
       if (video.paused) video.play().catch(() => {});
       else video.pause();
-    });
-
-    overlay.addEventListener("pointerleave", () => {
-      pointerInside = false;
     });
   }
 
