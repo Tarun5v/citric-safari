@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffd84d"/>
+      <stop offset="1" stop-color="#f5a623"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded square backdrop -->
+  <rect x="8" y="8" width="496" height="496" rx="104" fill="url(#bg)"/>
+
+  <!-- Leaf -->
+  <path d="M256 96c34 30 48 68 42 112-34-30-48-68-42-112z" fill="#3e9a4d"/>
+  <path d="M269 190c16-10 30-22 38-42-24 6-40 18-56 32 6 4 12 7 18 10z" fill="#2f7a3d"/>
+
+  <!-- Citrus half -->
+  <circle cx="256" cy="296" r="168" fill="#fffdf4" stroke="#f0e3b8" stroke-width="10"/>
+
+  <!-- Segments -->
+  <g stroke="#f5c64a" stroke-width="26" stroke-linecap="round" opacity="0.9">
+    <g transform="rotate(0 256 296)">
+      <path d="M256 296 L256 146"/>
+      <path d="M256 296 L369 238"/>
+      <path d="M256 296 L369 354"/>
+      <path d="M256 296 L256 446"/>
+      <path d="M256 296 L143 354"/>
+      <path d="M256 296 L143 238"/>
+      <path d="M256 296 L377 296" stroke="#ffe7a1"/>
+    </g>
+  </g>
+
+  <!-- Rind -->
+  <circle cx="256" cy="296" r="168" fill="none" stroke="#f7b733" stroke-width="22"/>
+</svg>
