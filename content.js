@@ -461,6 +461,7 @@
   }
 
   function toggleFullscreen(video) {
+    wireFullscreenGuard();
     // Exit first if a fullscreen view is already up.
     if (document.fullscreenElement || document.webkitFullscreenElement) {
       if (document.exitFullscreen) document.exitFullscreen();
@@ -479,6 +480,33 @@
     }
     // Ancient webkit only: present the media element itself.
     if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
+  }
+
+  // Safari refuses to re-size an absolutely positioned player to the viewport
+  // when it enters fullscreen, leaving black strips on two edges. So the moment
+  // our overlay becomes the fullscreen element we hammer it with inline styles
+  // that pin it to every edge of the screen; when fullscreen ends we restore
+  // the in-page placement.
+  function wireFullscreenGuard() {
+    if (window.__citricFsGuard) return;
+    window.__citricFsGuard = true;
+
+    const applyHolderSize = () => {
+      const overlay = document.getElementById("citric-player");
+      if (!overlay) return;
+      const fsEl = document.webkitFullscreenElement || document.fullscreenElement;
+      if (fsEl === overlay) {
+        overlay.style.cssText =
+          "position:fixed;top:0;left:0;width:100vw;height:100vh;" +
+          "max-width:none;max-height:none;z-index:2147483000;background:#000;";
+      } else if (!fsEl) {
+        overlay.style.cssText =
+          "position:absolute;inset:0;z-index:2147483000;background:#000;";
+      }
+    };
+
+    document.addEventListener("fullscreenchange", applyHolderSize);
+    document.addEventListener("webkitfullscreenchange", applyHolderSize);
   }
 
   // Toggle play/pause without fighting the engine that owns the media element.
