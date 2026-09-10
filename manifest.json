@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Citric",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "A lightweight review-free YouTube player for macOS Safari.",
   "permissions": ["activeTab", "scripting"],
   "content_scripts": [

@@ -17,6 +17,9 @@ It simply replaces the player chrome so the video renders natively.
   and plays the same stream in a plain `<video>` tag.
 - **Native controls** — playback sits on Safari's own media engine, so AirPlay,
   Picture-in-Picture, keyboard controls and the system volume OSD just work.
+- **Hover-friendly playback** — a slim native-style bar (play, ±10s, seek,
+  volume, PiP, AirPlay, fullscreen) fades in on hover, and moving the cursor
+  over the middle of the video toggles play/pause just like the stock player.
 - **Privately hosted** — install it straight from this repository. There is no
   App Store fee, no review process, and no code executed server-side.
 - **SPA-friendly** — clicking through recommended videos never leaves a black

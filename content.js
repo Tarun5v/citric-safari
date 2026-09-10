@@ -426,6 +426,63 @@
   let controlsBar = null;
   let controlsVideo = null;
 
+  const wiredOverlays = new WeakSet();
+  let hidingTimer;
+  let scrubbing = false;
+
+  function showBar() {
+    if (!controlsBar) return;
+    controlsBar.classList.add("visible");
+    const video = activeVideo();
+    window.clearTimeout(hidingTimer);
+    if (video && video.paused) return;
+    hidingTimer = window.setTimeout(() => {
+      if (!scrubbing) controlsBar.classList.remove("visible");
+    }, 2600);
+  }
+
+  // Once-per-overlay wiring: show the bar on movement, and toggle play/pause
+  // when the cursor enters the middle of the video — like clicking on YouTube,
+  // but without the click. The trigger box only covers the central area, so
+  // reaching for the control bar below never toggles playback by accident.
+  function wireOverlay(overlay) {
+    if (wiredOverlays.has(overlay)) return;
+    wiredOverlays.add(overlay);
+
+    overlay.addEventListener("mousemove", showBar);
+    overlay.addEventListener("mouseleave", () => {
+      const video = activeVideo();
+      if (!scrubbing && (!video || !video.paused)) {
+        controlsBar.classList.remove("visible");
+      }
+    });
+
+    const BOX = { top: 0.2, right: 0.82, bottom: 0.8, left: 0.18 };
+    let inBox = false;
+
+    overlay.addEventListener("mousemove", (event) => {
+      const rect = overlay.getBoundingClientRect();
+      const w = rect.width || 1;
+      const h = rect.height || 1;
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+
+      const hit =
+        x >= BOX.left * w &&
+        x <= BOX.right * w &&
+        y >= BOX.top * h &&
+        y <= BOX.bottom * h;
+      if (hit === inBox) return;
+      inBox = hit;
+      if (!hit) return;
+
+      const video = activeVideo();
+      if (!video) return;
+      if (video.paused) video.play().catch(() => {});
+      else video.pause();
+    });
+  }
+
   function updateBarState(video) {
     if (!controlsBar) return;
     const playBtn = controlsBar.querySelector('[data-action="play"]');
@@ -469,23 +526,7 @@
     const time = controlsBar.querySelector(".citric-time");
     const spinner = overlay.querySelector(".citric-spinner");
 
-    let hidingTimer;
-    let scrubbing = false;
-
-    const showBar = () => {
-      controlsBar.classList.add("visible");
-      window.clearTimeout(hidingTimer);
-      if (!video.paused) {
-        hidingTimer = window.setTimeout(() => {
-          if (!scrubbing) controlsBar.classList.remove("visible");
-        }, 2600);
-      }
-    };
-
-    overlay.addEventListener("mousemove", showBar);
-    overlay.addEventListener("mouseleave", () => {
-      if (!video.paused && !scrubbing) controlsBar.classList.remove("visible");
-    });
+    wireOverlay(overlay);
 
     video.addEventListener("play", () => {
       updateBarState(video);
