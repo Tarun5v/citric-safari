@@ -532,15 +532,6 @@
     });
     video.addEventListener("volumechange", () => updateBarState(video));
 
-    // Clicking anywhere on the picture toggles play/pause, like YouTube. This
-    // lives on the video element — not the overlay — so it keeps working when
-    // the video fills the screen in fullscreen mode.
-    video.addEventListener("click", () => {
-      const current = activeVideo();
-      if (!current) return;
-      if (current.paused) current.play().catch(() => {});
-      else current.pause();
-    });
     // YouTube's engine likes to re-apply pointer-events:none to its own video;
     // never let that swallow clicks meant for the picture.
     video.addEventListener("webkitbeginfullscreen", () => {
@@ -672,6 +663,27 @@
     };
 
     document.addEventListener("keydown", handler);
+  }
+
+  // Clicking anywhere on the picture toggles play/pause, like clicking on
+  // YouTube. This is born on the document in the capture phase so it also
+  // catches clicks while the media element is presented fullscreen — Safari
+  // can swallow clicks on the element itself by then, but the document always
+  // sees them first. The control bar is excluded so its buttons stay safe.
+  if (!window.__citricClickWired) {
+    window.__citricClickWired = true;
+    document.addEventListener(
+      "click",
+      (event) => {
+        const video = activeVideo();
+        if (!video || !event.target) return;
+        if (event.target !== video && !video.contains(event.target)) return;
+        if (event.target.closest && event.target.closest(".citric-bar")) return;
+        if (video.paused) video.play().catch(() => {});
+        else video.pause();
+      },
+      true
+    );
   }
 
   /* ------------------------------------------------------------------ *
