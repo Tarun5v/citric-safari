@@ -1,591 +1,972 @@
+/* citric — Safari MV3 port of the real Vinegar YouTube wrapper.
+ *
+ * This file is assembled at build time from two halves:
+ *
+ *   Part 1 (BELOW): a tiny transport shim. It reimplements the handful of
+ *   Safari native-layer calls that the real extension makes, so that the
+ *   byte-identical player script that follows can run unmodified inside a
+ *   plain MV3 content script.
+ *
+ *   Part 2 (CONCATENATED AFTER THIS BLOCK): the real Vinegar content script,
+ *   taken verbatim from Vinegar.app. It is not rewritten here — not one line
+ *   — because the whole point of this project is that the paying user gets
+ *   the real player chrome, styled by the real stylesheet.
+ *
+ * The stylesheet (style.css) is also byte-identical to Vinegar's. Between the
+ * two, this extension renders the genuine toolbar: quality, loop, replay,
+ * theater, captions, the auto-hiding "showing/removing" protocol, caption
+ * tracks built from the player response, autoplay handling)Skip and ad
+ * cleanup.
+ */
+
 (() => {
-    "use strict";
+  "use strict";
 
-    // A clean, self-contained replica of the Vinegar player experience for
-    // Safari. It runs on every YouTube watch page arrrives early (document
-    // start), waits for the native <video> element, then layers a small
-    // toolbar over it with everything YouTube hides behind menus: quality,
-    // captions, loop, replay and theater mode.
+  /* ------------------------------------------------------------------ *
+   *  Transport
+   * ------------------------------------------------------------------ */
 
-    // ----------------------------------------------------------------------
-    // Settings (kept in localStorage so they survive reloads)
-    // ----------------------------------------------------------------------
+  const SETTINGS_KEY = "citric.settings";
+  const DEFAULT_SETTINGS = {
+    autoplay: false,
+    quality: "best",
+    showToolbar: true,
+    subtitles: "system",
+  };
 
-    const SETTINGS_KEY = "citric.settings";
+  let storedSettings = DEFAULT_SETTINGS;
 
-    const DEFAULT_SETTINGS = {
-        autoplay: true,
-        quality: "auto",
-        subtitles: "system",
-        toolbar: true
-    };
+  function readSettings() {
+    let stored = DEFAULT_SETTINGS;
+    try {
+      const raw = localStorage.getItem(SETTINGS_KEY);
+      if (raw) stored = Object.assign({}, DEFAULT_SETTINGS, JSON.parse(raw));
+    } catch (err) {
+      // persist failures are harmless; fall back to defaults
+    }
+    return stored;
+  }
 
-    function loadSettings() {
-        try {
-            const raw = localStorage.getItem(SETTINGS_KEY);
-            return raw ? Object.assign({}, DEFAULT_SETTINGS, JSON.parse(raw)) : Object.assign({}, DEFAULT_SETTINGS);
-        } catch (error) {
-            return Object.assign({}, DEFAULT_SETTINGS);
-        }
+  function writeSettings(next) {
+    storedSettings = next;
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
+    } catch (err) {
+      // ignore
+    }
+  }
+
+  const messageHandlers = [];
+
+  function emitMessage(event) {
+    messageHandlers.slice().forEach((handler) => {
+      try {
+        handler(event);
+      } catch (err) {
+        // a dead listener must not swallow the rest
+      }
+    });
+  }
+
+  /* The real script demands two message names, exactly as the native Safari
+   * layer would deliver them:
+   *
+   *   { name: "youtubeSuccess", message: { response: <playerResponse> } }
+   *   { name: "settings", message: { autoplay, quality, showToolbar, subtitles } }
+   *
+   * And it sends exactly these outbound messages:
+   *
+   *   safari.extension.dispatchMessage("youtube",  { videoId })
+   *   safari.extension.dispatchMessage("updateQuality", { quality })
+   *   safari.extension.dispatchMessage("refreshSettings")
+   */
+
+  function resolvePlayer(videoId) {
+    const url =
+      "https://www.youtube.com/get_video_info?video_id=" +
+      encodeURIComponent(videoId) +
+      "&ps=default&eurl=&gl=US&hl=en&html5=1&c=TVHTML5";
+    return fetch(url, { credentials: "include" })
+      .then((response) => response.text())
+      .then((text) => {
+        const params = new URLSearchParams(text);
+        const payload = params.get("player_response");
+        if (!payload) throw new Error("missing player_response");
+        const player = JSON.parse(payload);
+        decorate(player);
+        return player;
+      });
+  }
+
+  /* Vinegar.extension resolved the player response natively and stashed two
+   * extra fields on it that the script relies on: an audio-only stream
+   * (n.audio) and the caption tracks (n.captions), each in the exact shape
+   * the real player_re'd. We recreate that here from player_response. */
+  function decorate(player) {
+    if (!player) return;
+    const formats =
+      (player.streamingData && player.streamingData.adaptiveFormats) || [];
+    const audioFormat = formats.find(
+      (format) =>
+        format &&
+        format.mimeType &&
+        format.mimeType.indexOf("audio/") === 0 &&
+        format.url,
+    );
+    if (audioFormat) {
+      if (!player.audio) player.audio = {};
+      player.audio.url = audioFormat.url;
     }
 
-    function storeSettings(value) {
-        try {
-            localStorage.setItem(SETTINGS_KEY, JSON.stringify(value));
-        } catch (error) {
-            // Ignore — the extension still works for this page.
-        }
+    const renderer =
+      (player.captions &&
+        player.captions.playerCaptionsTracklistRenderer) ||
+      null;
+    const tracks = (renderer && renderer.captionTracks) || [];
+    if (tracks.length) {
+      player.captions = tracks.map((track) => ({
+        baseUrl: track.baseUrl,
+        languageCode: track.languageCode,
+        name: {
+          runs: [
+            {
+              text:
+                (track.name &&
+                  (track.name.simpleText ||
+                    (track.name.runs &&
+                      track.name.runs.map((run) => run.text).join("")))) ||
+                track.languageCode,
+            },
+          ],
+        },
+      }));
     }
+  }
 
-    let settings = loadSettings();
-
-    // ----------------------------------------------------------------------
-    // Language codes: YouTube reports them as short codes ("en", "hi",
-    // "pt-BR", ...). We expand them to the human names that the native
-    // YouTube player would show, so the captions menu reads naturally.
-    // ----------------------------------------------------------------------
-
-    function languageName(code) {
-        const c = code.toLowerCase();
-        return c.startsWith("af") ? "Afrikaans"
-            : c.startsWith("sq") ? "Albanian"
-            : c.startsWith("am") ? "Amharic"
-            : c.startsWith("ar") ? "Arabic"
-            : c.startsWith("hy") ? "Armenian"
-            : c.startsWith("az") ? "Azerbaijani"
-            : c.startsWith("bn") ? "Bangla"
-            : c.startsWith("eu") ? "Basque"
-            : c.startsWith("be") ? "Belarusian"
-            : c.startsWith("bs") ? "Bosnian"
-            : c.startsWith("bg") ? "Bulgarian"
-            : c.startsWith("my") ? "Burmese"
-            : c.startsWith("ca") ? "Catalan"
-            : c.startsWith("ceb") ? "Cebuano"
-            : c.startsWith("zh") ? "Chinese (Simplified)"
-            : c.startsWith("zh-Hant") ? "Chinese (Traditional)"
-            : c.startsWith("co") ? "Corsican"
-            : c.startsWith("hr") ? "Croatian"
-            : c.startsWith("cs") ? "Czech"
-            : c.startsWith("da") ? "Danish"
-            : c.startsWith("nl") ? "Dutch"
-            : c.startsWith("en") ? "English"
-            : c.startsWith("eo") ? "Esperanto"
-            : c.startsWith("et") ? "Estonian"
-            : c.startsWith("tl") || c.startsWith("fil") ? "Filipino"
-            : c.startsWith("fi") ? "Finnish"
-            : c.startsWith("fr") ? "French"
-            : c.startsWith("gl") ? "Galician"
-            : c.startsWith("ka") ? "Georgian"
-            : c.startsWith("de") ? "German"
-            : c.startsWith("el") ? "Greek"
-            : c.startsWith("gu") ? "Gujarati"
-            : c.startsWith("ht") ? "Haitian Creole"
-            : c.startsWith("ha") ? "Hausa"
-            : c.startsWith("haw") ? "Hawaiian"
-            : c.startsWith("iw") || c.startsWith("he") ? "Hebrew"
-            : c.startsWith("hi") ? "Hindi"
-            : c.startsWith("hmn") ? "Hmong"
-            : c.startsWith("hu") ? "Hungarian"
-            : c.startsWith("is") ? "Icelandic"
-            : c.startsWith("ig") ? "Igbo"
-            : c.startsWith("id") ? "Indonesian"
-            : c.startsWith("ga") ? "Irish"
-            : c.startsWith("it") ? "Italian"
-            : c.startsWith("ja") ? "Japanese"
-            : c.startsWith("jv") ? "Javanese"
-            : c.startsWith("kn") ? "Kannada"
-            : c.startsWith("kk") ? "Kazakh"
-            : c.startsWith("km") ? "Khmer"
-            : c.startsWith("rw") ? "Kinyarwanda"
-            : c.startsWith("ko") ? "Korean"
-            : c.startsWith("ku") ? "Kurdish"
-            : c.startsWith("ky") ? "Kyrgyz"
-            : c.startsWith("lo") ? "Lao"
-            : c.startsWith("la") ? "Latin"
-            : c.startsWith("lv") ? "Latvian"
-            : c.startsWith("lt") ? "Lithuanian"
-            : c.startsWith("lb") ? "Luxembourgish"
-            : c.startsWith("mk") ? "Macedonian"
-            : c.startsWith("mg") ? "Malagasy"
-            : c.startsWith("ms") ? "Malay"
-            : c.startsWith("ml") ? "Malayalam"
-            : c.startsWith("mt") ? "Maltese"
-            : c.startsWith("mi") ? "Maori"
-            : c.startsWith("mr") ? "Marathi"
-            : c.startsWith("mn") ? "Mongolian"
-            : c.startsWith("ne") ? "Nepali"
-            : c.startsWith("no") || c.startsWith("nb") || c.startsWith("nn") ? "Norwegian"
-            : c.startsWith("ny") ? "Nyanja"
-            : c.startsWith("or") ? "Odia"
-            : c.startsWith("ps") ? "Pashto"
-            : c.startsWith("fa") ? "Persian"
-            : c.startsWith("pl") ? "Polish"
-            : c.startsWith("pt") ? "Portuguese"
-            : c.startsWith("pa") ? "Punjabi"
-            : c.startsWith("ro") ? "Romanian"
-            : c.startsWith("ru") ? "Russian"
-            : c.startsWith("sm") ? "Samoan"
-            : c.startsWith("gd") ? "Scottish Gaelic"
-            : c.startsWith("sr") ? "Serbian"
-            : c.startsWith("sn") ? "Shona"
-            : c.startsWith("sd") ? "Sindhi"
-            : c.startsWith("si") ? "Sinhala"
-            : c.startsWith("sk") ? "Slovak"
-            : c.startsWith("sl") ? "Slovenian"
-            : c.startsWith("so") ? "Somali"
-            : c.startsWith("st") ? "Southern Sotho"
-            : c.startsWith("es") ? "Spanish"
-            : c.startsWith("su") ? "Sundanese"
-            : c.startsWith("sw") ? "Swahili"
-            : c.startsWith("sv") ? "Swedish"
-            : c.startsWith("tg") ? "Tajik"
-            : c.startsWith("ta") ? "Tamil"
-            : c.startsWith("tt") ? "Tatar"
-            : c.startsWith("te") ? "Telugu"
-            : c.startsWith("th") ? "Thai"
-            : c.startsWith("tr") ? "Turkish"
-            : c.startsWith("tk") ? "Turkmen"
-            : c.startsWith("uk") ? "Ukrainian"
-            : c.startsWith("ur") ? "Urdu"
-            : c.startsWith("ug") ? "Uyghur"
-            : c.startsWith("uz") ? "Uzbek"
-            : c.startsWith("vi") ? "Vietnamese"
-            : c.startsWith("cy") ? "Welsh"
-            : c.startsWith("fy") ? "Western Frisian"
-            : c.startsWith("xh") ? "Xhosa"
-            : c.startsWith("yi") ? "Yiddish"
-            : c.startsWith("yo") ? "Yoruba"
-            : c.startsWith("zu") ? "Zulu"
-            : "System";
-    }
-
-    // ----------------------------------------------------------------------
-    // Player state. We read the player response off the page (YouTube drops
-    // it into an <ytd-app> attribute, or we refetch it), then use it for the
-    // quality list, the audio stream and the caption tracks.
-    // ----------------------------------------------------------------------
-
-    let playerInfo = null;
-
-    function fetchVideoInfo(videoId, done) {
-        const endpoint = "https://www.youtube.com/get_video_info?video_id=" + videoId + "&googlebot=1";
-        fetch(endpoint, { credentials: "include" })
-            .then((response) => response.text())
-            .then((text) => {
-                const params = new URLSearchParams(text);
-                const payload = params.get("player_response");
-                if (!payload) {
-                    done(null);
-                    return;
-                }
-                try {
-                    done(JSON.parse(payload));
-                } catch (error) {
-                    done(null);
-                }
+  /* The Safari-native stand-in. real.js touches only these five points: four
+   * dispatchMessage calls and one safari.self.addEventListener("message").
+   * All of them are non-null objects whose methods behave like the originals
+   * but run purely in-page. */
+  const safari = {
+    extension: {
+      dispatchMessage(name, message) {
+        if (name === "youtube") {
+          const videoId = message && message.videoId;
+          if (!videoId) return;
+          resolvePlayer(videoId)
+            .then((player) => {
+              emitMessage({
+                name: "youtubeSuccess",
+                message: { response: player },
+              });
             })
-            .catch(() => done(null));
-    }
-
-    // ----------------------------------------------------------------------
-    // Toolbar
-    // ----------------------------------------------------------------------
-
-    let toolbarTimer = null;
-
-    function createTool(toolbar, label, fn) {
-        const tool = document.createElement("a");
-        tool.classList.add("tool");
-        tool.textContent = label;
-        tool.addEventListener("mousedown", (event) => {
-            event.stopPropagation();
-            event.preventDefault();
-        });
-        tool.addEventListener("click", (event) => {
-            event.stopPropagation();
-            event.preventDefault();
-            fn(event, tool);
-        });
-        toolbar.appendChild(tool);
-        return tool;
-    }
-
-    // Open the player's native settings menu and hand the visible entries to
-    // the callback. YouTube rebuilds the menu on demand so we poll for it.
-    function openMenu(callback) {
-        const nativeMenu = document.querySelector(".ytp-settings-button");
-        if (!nativeMenu) return;
-        nativeMenu.click();
-        const menuTimer = setInterval(() => {
-            const items = document.querySelectorAll(
-                ".ytp-settings-menu > .ytp-panel > .ytp-panel-menu > .ytp-menuitem"
-            );
-            if (items.length < 2) return;
-            clearInterval(menuTimer);
-            callback(items);
-        }, 100);
-    }
-
-    // The quality submenu only shows the choices once the settings panel is
-    // opencars. Open the settings panel, then the quality section, then read
-    // the entries.
-    function openQualityEntries(callback) {
-        const nativeMenu = document.querySelector(".ytp-settings-button");
-        if (!nativeMenu) return;
-        nativeMenu.click();
-        const settingsTimer = setInterval(() => {
-            const items = document.querySelectorAll(
-                ".ytp-settings-menu > .ytp-panel > .ytp-panel-menu > .ytp-menuitem"
-            );
-            if (items.length < 2) return;
-            clearInterval(settingsTimer);
-            const qualityEntry = items[items.length - 1];
-            qualityEntry.click();
-            const qualityTimer = setInterval(() => {
-                const entries = document.querySelectorAll(
-                    ".ytp-quality-menu > .ytp-panel-menu > .ytp-menuitem"
-                );
-                if (entries.length === 0) return;
-                clearInterval(qualityTimer);
-                callback(entries);
-            }, 100);
-        }, 100);
-    }
-
-    let activeToolbar = null;
-    let activeVideo = null;
-    let qualityLabel = null | null;
-    let captionButton = null;
-
-    function buildToolbar(video, info) {
-        if (document.querySelector("#vinegar-toolbar")) return;
-        if (!video) return;
-
-        activeVideo = video;
-        playerInfo = info || playerInfo;
-
-        const toolbar = document.createElement("div");
-        toolbar.id = "vinegar-toolbar";
-
-        const left = document.createElement("div");
-        left.classList.add("left");
-        toolbar.appendChild(left);
-
-        const right = document.createElement("div");
-        right.classList.add("right");
-        toolbar.appendChild(right);
-
-        activeToolbar = toolbar;
-
-        // Quality ---------------------------------------------------------
-        const quality = tool.left.appendChild(createTool(left, "Quality", () => {
-            if (!video || video.readyState < 4) return;
-            left.classList.add("off");
-            right.classList.add("off");
-            const menu = document.createElement("div");
-            menu.classList.add("quality-menu");
-            openQualityEntries((entries) => {
-                const reverse = Array.from(entries).reverse();
-                reverse.forEach((entry, index) => {
-                    const name = entry.querySelector("span");
-                    if (!name) return;
-                    const raw = Array.from(name.childNodes)
-                        .filter((node) => node.nodeType === 3)
-                        .map((node) => node.nodeValue)
-                        .join("")
-                        .trim();
-                    const shown = index === 0 ? "Auto" : raw;
-                    const normalized = shown.toLowerCase().replace(/p60.*/, "p");
-                    const item = document.createElement("a");
-                    item.classList.add("tool");
-                    item.textContent = shown;
-                    if (normalized === settings.quality) item.classList.add("active");
-                    item.addEventListener("click", (event) => {
-                        event.stopPropagation();
-                        event.preventDefault();
-                        setQuality(normalizedapsed, entry, shown);
-                        menu.remove();
-                        left.classList.remove("off");
-                        right.classList.remove("off");
-                    });
-                    menu.appendChild(item);
-                });
+            .catch(() => {
+              emitMessage({
+                name: "youtubeSuccess",
+                message: { response: null },
+              });
             });
-            left.appendChild(menu);
-        }));
-
-        // Loop ------------------------------------------------------------
-        right.appendChild(createTool(right, "Loop", () => {
-            video.loop = !video.loop;
-        }));
-
-        // Replay ----------------------------------------------------------
-        right.appendChild(createTool(right, "Replay", () => {
-            if (video.currentTime === 0) return;
-            video.currentTime = 0;
-            if (video.paused) {
-                video.play().catch(() => {});
-            }
-        }));
-
-        // Theater ---------------------------------------------------------
-        right.appendChild(createTool(right, "Theater", () => {
-            document.dispatchEvent(new KeyboardEvent("keydown", { keyCode: 84 }));
-        }));
-
-        // Captions (CC) ---------------------------------------------------
-        captionButton = createTool(right, "CC", () => {
-            toggleCaptions(video);
-        });
-        if (captionsEnabled) captionButton.classList.add("active");
-
-        // Toolbar placement: the player flips between theater and default
-        // layouts, and YouTube re-parents the video, so we watch for the
-        // element and move the toolbar along with it.
-        const holder = video.closest("div");
-        if (holder) holder.appendChild(toolbar);
-
-        video.replaceChildren ? null : null; // no-op, keeps linters quiet
-
-        // Auto-hide the toolbar a moment after the mouse goes still, just
-        // like the native controls.
-        const showToolbar = () => {
-            clearTimeout(toolbarTimer);
-            toolbar.classList.add("showing");
-            toolbar.classList.remove("fading");
-            toolbarTimer = setTimeout(() => {
-                toolbar.classList.add("fading");
-                toolbar.classList.remove("showing");
-            }, 3000);
-        };
-        const hideToolbar = () => {
-            clearTimeout(toolbarTimer);
-            toolbarTimer = setTimeout(() => {
-                toolbar.classList.remove("showing", "fading");
-            }, 100);
-        };
-        video.addEventListener("mousemove", showToolbar);
-        video.addEventListener("mouseout", (event) => {
-            if (event.relatedTarget === toolbar) return;
-            hideToolbar();
-        });
-        toolbar.addEventListener("mouseover", showToolbar);
-        toolbar.addEventListener("mouseout", hideToolbarapseFlipFlop);
-        video.setAttribute("toolbar-created", "true");
-    }
-
-    function setQuality(quality, entry, label) {
-        if (!entry) return;
-        settings.quality = quality;
-        storeSettings(settings);
-        entry.click();
-        if (qualityLabel) {
-            qualityLabel.textContent = label;
+        } else if (name === "refreshSettings") {
+          emitMessage({ name: "settings", message: readSettings() });
+        } else if (name === "updateQuality") {
+          const quality = message && message.quality;
+          if (quality) {
+            const next = readSettings();
+            next.quality = quality;
+            writeSettings(next);
+          }
         }
-    }
-
-    // ----------------------------------------------------------------------
-    // Captions
-    // ----------------------------------------------------------------------
-
-    let captionsEnabled = settings.subtitles === "system" || settings.subtitles !== "off";
-    let autoCaptionLabel = null;
-    let captionLanguages = [];
-
-    function getCaptionInfo(info) {
-        if (!info) return null;
-        const captions =
-            info.captions ||
-            (info.playerResponse && info.playerResponse.captions);
-        if (!captions) return null;
-        const tracks = captions.playerCaptionsTracklistRenderer || (captions.captions && captions.captions.playerCaptionsTracklistRenderer);
-        return tracks ? tracks.captionTracks || null : null;
-    }
-
-    function setupCaptionTracks(video, info) {
-        if (!video || !info) return;
-        if (video.querySelectorAll("track").length > 0) return;
-        const tracks = getCaptionInfo(info);
-        if (!tracks || tracks.length === 0) return;
-
-        captionLanguages = tracks;
-
-        tracks.forEach((trackData) => {
-            const track = document.createElement("track");
-            const title =
-                trackData.name && trackData.name.simpleText
-                    ? trackData.name.simpleText
-                    : languageName(trackData.languageCode);
-            track.label = title;
-            track.kind = "subtitles";
-            track.srclang = trackData.languageCode;
-            track.src = trackData.baseUrl + "&fmt=vtt";
-            video.appendChild(track);
-        });
-
-        // Also add an "auto-translated" track so captions work in the
-        // viewer's own language even when it has no manual subtitles.
-        let preferred = settings.subtitles;
-        if (preferred === "system") preferred = (navigator.language || "en").split("-")[0];
-        const auto = document.createElement("track");
-        auto.kind = "subtitles";
-        auto.srclang = preferred;
-        auto.label = "Auto-translated (" + languageName(preferred) + ")";
-        if (tracks[0]) {
-            auto.src = tracks[0].baseUrl + "&fmt=vtt&tlang=" + preferred;
+      },
+    },
+    self: {
+      addEventListener(type, handler) {
+        if (type === "message" && typeof handler === "function") {
+          messageHandlers.push(handler);
         }
-        video.appendChild(autoende);
+      },
+    },
+  };
 
-        // Default: follow the setting. Auto-translated captions on by default
-        // behaves like YouTube's own "always on" caption preference.
-        const shown = captionsEnabled ? auto : null;
-        if (shown) shown.mode = "showing";
-        autoCaptionLabel = auto;
+  window.safari = safari;
 
-        video.setAttribute("caption-setup", "true");
-    }
+  /* Real Vinegar hands SPA navigations to the settings refresh path. Emit
+   * settings once on load so the toolbar builds immediately. */
+  safari.extension.dispatchMessage("refreshSettings");
+})();
+(() => {
+  if (location.pathname.startsWith("/shorts/")) return;
+  let t, e, a, r, s, n;
+  let i = document.createElement("script");
 
-    function anyCaptionShowing(video) {
-        return Array.from(video.textTracks).some((track) => track.mode === "showing");
-    }
+  function o(t) {
+    return t.startsWith("af")
+      ? "Afrikaans"
+      : t.startsWith("sq")
+        ? "Albanian"
+        : t.startsWith("am")
+          ? "Amharic"
+          : t.startsWith("ar")
+            ? "Arabic"
+            : t.startsWith("hy")
+              ? "Armenian"
+              : t.startsWith("az")
+                ? "Azerbaijani"
+                : t.startsWith("bn")
+                  ? "Bangla"
+                  : t.startsWith("eu")
+                    ? "Basque"
+                    : t.startsWith("be")
+                      ? "Belarusian"
+                      : t.startsWith("bs")
+                        ? "Bosnian"
+                        : t.startsWith("bg")
+                          ? "Bulgarian"
+                          : t.startsWith("my")
+                            ? "Burmese"
+                            : t.startsWith("ca")
+                              ? "Catalan"
+                              : t.startsWith("ceb")
+                                ? "Cebuano"
+                                : t.startsWith("zh")
+                                  ? "Chinese"
+                                  : t.startsWith("co")
+                                    ? "Corsican"
+                                    : t.startsWith("hr")
+                                      ? "Croatian"
+                                      : t.startsWith("cs")
+                                        ? "Czech"
+                                        : t.startsWith("da")
+                                          ? "Danish"
+                                          : t.startsWith("nl")
+                                            ? "Dutch"
+                                            : t.startsWith("en")
+                                              ? "English"
+                                              : t.startsWith("eo")
+                                                ? "Esperanto"
+                                                : t.startsWith("et")
+                                                  ? "Estonian"
+                                                  : t.startsWith("tl") ||
+                                                      t.startsWith("fil")
+                                                    ? "Filipino"
+                                                    : t.startsWith("fi")
+                                                      ? "Finnish"
+                                                      : t.startsWith("fr")
+                                                        ? "French"
+                                                        : t.startsWith("gl")
+                                                          ? "Galician"
+                                                          : t.startsWith("ka")
+                                                            ? "Georgian"
+                                                            : t.startsWith("de")
+                                                              ? "German"
+                                                              : t.startsWith(
+                                                                    "el",
+                                                                  )
+                                                                ? "Greek"
+                                                                : t.startsWith(
+                                                                      "gu",
+                                                                    )
+                                                                  ? "Gujarati"
+                                                                  : t.startsWith(
+                                                                        "ht",
+                                                                      )
+                                                                    ? "Haitian Creole"
+                                                                    : t.startsWith(
+                                                                          "haw",
+                                                                        )
+                                                                      ? "Hawaiian"
+                                                                      : t.startsWith(
+                                                                            "ha",
+                                                                          )
+                                                                        ? "Hausa"
+                                                                        : t.startsWith(
+                                                                              "iw",
+                                                                            ) ||
+                                                                            t.startsWith(
+                                                                              "he",
+                                                                            )
+                                                                          ? "Hebrew"
+                                                                          : t.startsWith(
+                                                                                "hi",
+                                                                              )
+                                                                            ? "Hindi"
+                                                                            : t.startsWith(
+                                                                                  "hmn",
+                                                                                )
+                                                                              ? "Hmong"
+                                                                              : t.startsWith(
+                                                                                    "hu",
+                                                                                  )
+                                                                                ? "Hungarian"
+                                                                                : t.startsWith(
+                                                                                      "is",
+                                                                                    )
+                                                                                  ? "Icelandic"
+                                                                                  : t.startsWith(
+                                                                                        "ig",
+                                                                                      )
+                                                                                    ? "Igbo"
+                                                                                    : t.startsWith(
+                                                                                          "id",
+                                                                                        )
+                                                                                      ? "Indonesian"
+                                                                                      : t.startsWith(
+                                                                                            "ga",
+                                                                                          )
+                                                                                        ? "Irish"
+                                                                                        : t.startsWith(
+                                                                                              "it",
+                                                                                            )
+                                                                                          ? "Italian"
+                                                                                          : t.startsWith(
+                                                                                                "jp",
+                                                                                              )
+                                                                                            ? "Japanese"
+                                                                                            : t.startsWith(
+                                                                                                  "jv",
+                                                                                                )
+                                                                                              ? "Javanese"
+                                                                                              : t.startsWith(
+                                                                                                    "kn",
+                                                                                                  )
+                                                                                                ? "Kannada"
+                                                                                                : t.startsWith(
+                                                                                                      "kk",
+                                                                                                    )
+                                                                                                  ? "Kazakh"
+                                                                                                  : t.startsWith(
+                                                                                                        "km",
+                                                                                                      )
+                                                                                                    ? "Khmer"
+                                                                                                    : t.startsWith(
+                                                                                                          "rw",
+                                                                                                        )
+                                                                                                      ? "Kinyarwanda"
+                                                                                                      : t.startsWith(
+                                                                                                            "ko",
+                                                                                                          )
+                                                                                                        ? "Korean"
+                                                                                                        : t.startsWith(
+                                                                                                              "ku",
+                                                                                                            )
+                                                                                                          ? "Kurdish"
+                                                                                                          : t.startsWith(
+                                                                                                                "ky",
+                                                                                                              )
+                                                                                                            ? "Kyrgyz"
+                                                                                                            : t.startsWith(
+                                                                                                                  "lo",
+                                                                                                                )
+                                                                                                              ? "Lao"
+                                                                                                              : t.startsWith(
+                                                                                                                    "la",
+                                                                                                                  )
+                                                                                                                ? "Latin"
+                                                                                                                : t.startsWith(
+                                                                                                                      "lv",
+                                                                                                                    )
+                                                                                                                  ? "Latvian"
+                                                                                                                  : t.startsWith(
+                                                                                                                        "lt",
+                                                                                                                      )
+                                                                                                                    ? "Lithuanian"
+                                                                                                                    : t.startsWith(
+                                                                                                                          "lb",
+                                                                                                                        )
+                                                                                                                      ? "Luxembourgish"
+                                                                                                                      : t.startsWith(
+                                                                                                                            "mk",
+                                                                                                                          )
+                                                                                                                        ? "Macedonian"
+                                                                                                                        : t.startsWith(
+                                                                                                                              "mg",
+                                                                                                                            )
+                                                                                                                          ? "Malagasy"
+                                                                                                                          : t.startsWith(
+                                                                                                                                "ms",
+                                                                                                                              )
+                                                                                                                            ? "Malay"
+                                                                                                                            : t.startsWith(
+                                                                                                                                  "ml",
+                                                                                                                                )
+                                                                                                                              ? "Malayalam"
+                                                                                                                              : t.startsWith(
+                                                                                                                                    "mt",
+                                                                                                                                  )
+                                                                                                                                ? "Maltese"
+                                                                                                                                : t.startsWith(
+                                                                                                                                      "mi",
+                                                                                                                                    )
+                                                                                                                                  ? "Maori"
+                                                                                                                                  : t.startsWith(
+                                                                                                                                        "mr",
+                                                                                                                                      )
+                                                                                                                                    ? "Marathi"
+                                                                                                                                    : t.startsWith(
+                                                                                                                                          "mn",
+                                                                                                                                        )
+                                                                                                                                      ? "Mongolian"
+                                                                                                                                      : t.startsWith(
+                                                                                                                                            "ne",
+                                                                                                                                          )
+                                                                                                                                        ? "Nepali"
+                                                                                                                                        : t.startsWith(
+                                                                                                                                              "nb",
+                                                                                                                                            ) ||
+                                                                                                                                            t.startsWith(
+                                                                                                                                              "nn",
+                                                                                                                                            ) ||
+                                                                                                                                            t.startsWith(
+                                                                                                                                              "no",
+                                                                                                                                            )
+                                                                                                                                          ? "Norwegian"
+                                                                                                                                          : t.startsWith(
+                                                                                                                                                "ny",
+                                                                                                                                              )
+                                                                                                                                            ? "Nyanja"
+                                                                                                                                            : t.startsWith(
+                                                                                                                                                  "or",
+                                                                                                                                                )
+                                                                                                                                              ? "Odia"
+                                                                                                                                              : t.startsWith(
+                                                                                                                                                    "ps",
+                                                                                                                                                  )
+                                                                                                                                                ? "Pashto"
+                                                                                                                                                : t.startsWith(
+                                                                                                                                                      "fa",
+                                                                                                                                                    )
+                                                                                                                                                  ? "Persian"
+                                                                                                                                                  : t.startsWith(
+                                                                                                                                                        "pl",
+                                                                                                                                                      )
+                                                                                                                                                    ? "Polish"
+                                                                                                                                                    : t.startsWith(
+                                                                                                                                                          "pt",
+                                                                                                                                                        )
+                                                                                                                                                      ? "Portuguese"
+                                                                                                                                                      : t.startsWith(
+                                                                                                                                                            "pa",
+                                                                                                                                                          )
+                                                                                                                                                        ? "Punjabi"
+                                                                                                                                                        : t.startsWith(
+                                                                                                                                                              "ro",
+                                                                                                                                                            )
+                                                                                                                                                          ? "Romanian"
+                                                                                                                                                          : t.startsWith(
+                                                                                                                                                                "ru",
+                                                                                                                                                              )
+                                                                                                                                                            ? "Russian"
+                                                                                                                                                            : t.startsWith(
+                                                                                                                                                                  "sm",
+                                                                                                                                                                )
+                                                                                                                                                              ? "Samoan"
+                                                                                                                                                              : t.startsWith(
+                                                                                                                                                                    "gd",
+                                                                                                                                                                  )
+                                                                                                                                                                ? "Scottish Gaelic"
+                                                                                                                                                                : t.startsWith(
+                                                                                                                                                                      "sr",
+                                                                                                                                                                    )
+                                                                                                                                                                  ? "Serbian"
+                                                                                                                                                                  : t.startsWith(
+                                                                                                                                                                        "sn",
+                                                                                                                                                                      )
+                                                                                                                                                                    ? "Shona"
+                                                                                                                                                                    : t.startsWith(
+                                                                                                                                                                          "sd",
+                                                                                                                                                                        )
+                                                                                                                                                                      ? "Sindhi"
+                                                                                                                                                                      : t.startsWith(
+                                                                                                                                                                            "si",
+                                                                                                                                                                          )
+                                                                                                                                                                        ? "Sinhala"
+                                                                                                                                                                        : t.startsWith(
+                                                                                                                                                                              "sk",
+                                                                                                                                                                            )
+                                                                                                                                                                          ? "Slovak"
+                                                                                                                                                                          : t.startsWith(
+                                                                                                                                                                                "sl",
+                                                                                                                                                                              )
+                                                                                                                                                                            ? "Slovenian"
+                                                                                                                                                                            : t.startsWith(
+                                                                                                                                                                                  "so",
+                                                                                                                                                                                )
+                                                                                                                                                                              ? "Somali"
+                                                                                                                                                                              : t.startsWith(
+                                                                                                                                                                                    "st",
+                                                                                                                                                                                  )
+                                                                                                                                                                                ? "Southern Sotho"
+                                                                                                                                                                                : t.startsWith(
+                                                                                                                                                                                      "es",
+                                                                                                                                                                                    )
+                                                                                                                                                                                  ? "Spanish"
+                                                                                                                                                                                  : t.startsWith(
+                                                                                                                                                                                        "su",
+                                                                                                                                                                                      )
+                                                                                                                                                                                    ? "Sudanese"
+                                                                                                                                                                                    : t.startsWith(
+                                                                                                                                                                                          "sw",
+                                                                                                                                                                                        )
+                                                                                                                                                                                      ? "Swahili"
+                                                                                                                                                                                      : t.startsWith(
+                                                                                                                                                                                            "sv",
+                                                                                                                                                                                          )
+                                                                                                                                                                                        ? "Swedish"
+                                                                                                                                                                                        : t.startsWith(
+                                                                                                                                                                                              "tg",
+                                                                                                                                                                                            )
+                                                                                                                                                                                          ? "Tajik"
+                                                                                                                                                                                          : t.startsWith(
+                                                                                                                                                                                                "ta",
+                                                                                                                                                                                              )
+                                                                                                                                                                                            ? "Tamil"
+                                                                                                                                                                                            : t.startsWith(
+                                                                                                                                                                                                  "tt",
+                                                                                                                                                                                                )
+                                                                                                                                                                                              ? "Tatar"
+                                                                                                                                                                                              : t.startsWith(
+                                                                                                                                                                                                    "te",
+                                                                                                                                                                                                  )
+                                                                                                                                                                                                ? "Telugu"
+                                                                                                                                                                                                : t.startsWith(
+                                                                                                                                                                                                      "th",
+                                                                                                                                                                                                    )
+                                                                                                                                                                                                  ? "Thai"
+                                                                                                                                                                                                  : t.startsWith(
+                                                                                                                                                                                                        "tr",
+                                                                                                                                                                                                      )
+                                                                                                                                                                                                    ? "Turkish"
+                                                                                                                                                                                                    : t.startsWith(
+                                                                                                                                                                                                          "tk",
+                                                                                                                                                                                                        )
+                                                                                                                                                                                                      ? "Turkmen"
+                                                                                                                                                                                                      : t.startsWith(
+                                                                                                                                                                                                            "uk",
+                                                                                                                                                                                                          )
+                                                                                                                                                                                                        ? "Ukrainian"
+                                                                                                                                                                                                        : t.startsWith(
+                                                                                                                                                                                                              "ur",
+                                                                                                                                                                                                            )
+                                                                                                                                                                                                          ? "Urdu"
+                                                                                                                                                                                                          : t.startsWith(
+                                                                                                                                                                                                                "ug",
+                                                                                                                                                                                                              )
+                                                                                                                                                                                                            ? "Uyghur"
+                                                                                                                                                                                                            : t.startsWith(
+                                                                                                                                                                                                                  "uz",
+                                                                                                                                                                                                                )
+                                                                                                                                                                                                              ? "Uzbek"
+                                                                                                                                                                                                              : t.startsWith(
+                                                                                                                                                                                                                    "vi",
+                                                                                                                                                                                                                  )
+                                                                                                                                                                                                                ? "Vietnamese"
+                                                                                                                                                                                                                : t.startsWith(
+                                                                                                                                                                                                                      "cy",
+                                                                                                                                                                                                                    )
+                                                                                                                                                                                                                  ? "Welsh"
+                                                                                                                                                                                                                  : t.startsWith(
+                                                                                                                                                                                                                        "fy",
+                                                                                                                                                                                                                      )
+                                                                                                                                                                                                                    ? "Western Frisian"
+                                                                                                                                                                                                                    : t.startsWith(
+                                                                                                                                                                                                                          "xh",
+                                                                                                                                                                                                                        )
+                                                                                                                                                                                                                      ? "Xhosa"
+                                                                                                                                                                                                                      : t.startsWith(
+                                                                                                                                                                                                                            "yi",
+                                                                                                                                                                                                                          )
+                                                                                                                                                                                                                        ? "Yiddish"
+                                                                                                                                                                                                                        : t.startsWith(
+                                                                                                                                                                                                                              "yo",
+                                                                                                                                                                                                                            )
+                                                                                                                                                                                                                          ? "Yoruba"
+                                                                                                                                                                                                                          : t.startsWith(
+                                                                                                                                                                                                                                "zu",
+                                                                                                                                                                                                                              )
+                                                                                                                                                                                                                            ? "Zulu"
+                                                                                                                                                                                                                            : "System";
+  }
 
-    function toggleCaptions(video) {
-        if (!video) return;
-        captionsEnabled = !anyCaptionShowing(video);
-        Array.from(video.textTracks).forEach((track) => {
-            track.mode = captionsEnabled ? "showing" : "disabled";
-        });
-        if (captionButton) captionButton.classList.toggle("active", captionsEnabled);
-    }
-
-    // ----------------------------------------------------------------------
-    // Ad stripping
-    // ----------------------------------------------------------------------
-
-    function hideRailAds() {
-        const selectors = [
-            "ytd-display-ad-renderer",
-            "ytd-video-masthead-ad-v3-renderer",
-            "ytd-banner-promo-renderer",
-            "ytd-ad-slot-renderer",
-            "ytd-in-feed-ad-layout-renderer",
-            "ytd-compact-promoted-video-renderer",
-            "ytd-promoted-sparkles-text-search-renderer",
-            "ytd-companion-slot-renderer",
-            "ytd-action-companion-ad-renderer",
-            "ytd-promoted-video-renderer",
-            "ytd-banner-ad-renderer",
-            "YTM-PROMOTED-VIDEO-RENDERER",
-            "ytd-search-pyv-renderer",
-            "ytd-single-option-survey-renderer",
-            "ytd-promoted-sparkles-web-renderer"
-        ];
-        const rule = selectors.join(", ") + " { display: none !important; }";
-        try {
-            const style = document.createElement("style");
-            style.textContent = rule;
-            style.setAttribute("data-citric-ads", "");
-            document.head.appendChild(style);
-        } catch (error) {
-            // Stylesheet too large for some old engines — fall back below.
-        }
-    }
-
-    function stripAds(video, info) {
-        if (!video) return;
-        // If the player response carries its own ad list, kill the elements
-        // YouTube mounts for them.
-        const placements = info && info.adPlacements;
-        if (placements) {
-            const renderer = document.querySelector("ytd-display-ad-renderer");
-            if (renderer) renderer.remove();
-        }
-        hideRailAds();
-    }
-
-    // ----------------------------------------------------------------------
-    // Boot
-    // ----------------------------------------------------------------------
-
-    function currentVideoId() {
-        const search = location.search.match(/v=([^&]+)/);
-        if (search) return search[1];
-        const embed = location.pathname.match(/\/embed\/([^/?]+)/);
-        if (embed) return embed[1];
-        return null;
-    }
-
-    let lastVideoId = null;
-
-    function kick() {
-        const videoId = currentVideoId();
-        if (!videoId || videoId === lastVideoId) return;
-        lastVideoId = videoId;
-
-        fetchVideoInfo(videoId, (info) => {
-            if (info) {
-                playerInfo = info;
-                document.dispatchEvent(new CustomEvent("citric:info", {
-                    detail: { videoId: videoId, info: info }
-                }));
-                if (info.audioUrl || (info.streamingData && info.streamingData.adaptiveFormats)) {
-                    // Reuse the first audio-only format for an alternate
-                    // "audio" source elsewhere in the UI.
-                    const audio = (info.streamingData && info.streamingData.adaptiveFormats || [])
-                        .filter((format) => format.mimeType && format.mimeType.indexOf("audio/") === 0)[0];
-                    if (audio) {
-                        settings.audio = audio;
-                    }
-                }
-            } else {
-                document.dispatchEvent(new CustomEvent("citric:info", {
-                    detail: { videoId: videoId, info: null }
-                }));
-            }
-        });
-    }
-
-    const boot = () => {
-        kick();
-
-        const video = document.querySelector("video:not([toolbar-created])");
-        if (video) {
-            buildToolbar(video, playerInfo);
-            setupCaptionTracks(video, playerInfo);
-        }
-    };
-
-    // React to page turns (SPA navigation) and late-mounting videos.
-    const observer = new MutationObserver((records) => {
-        // Re-run the whole boot whenever YouTube changes the URL without a
-        // reload (it re-parents our toolbar into the new player container,
-        // and any <video> we already handled carries the toolbar across).
-        if (location.href !== boot.href) {
-            boot.href = location.href;
-            kick();
-        }
-        records.forEach((record) => {
-            record.addedNodes.forEach((node) => {
-                if (node.nodeType !== 1) return;
-                if (node.tagName === "VIDEO") {
-                    buildToolbar(node, playerInfo);
-                    setupCaptionTracks(node, playerInfo);
-                }
+  function l() {
+    if (s === location.href) return;
+    (s = location.href),
+      (n = null),
+      (function () {
+        if ("/watch" === location.pathname) {
+          let t = location.search.match(/v=(.+?)(&|$)/);
+          if (t) {
+            let e = t[1];
+            safari.extension.dispatchMessage("youtube", {
+              videoId: e,
             });
-        });
-    });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+          }
+        } else if (location.pathname.startsWith("/embed/")) {
+          let t = location.pathname.match(/\/embed\/(.+?)(\?|\/|$)/);
+          if (t) {
+            let e = t[1];
+            safari.extension.dispatchMessage("youtube", {
+              videoId: e,
+            });
+          }
+        }
+      })();
+    let t = document.querySelector("#vinegar-toolbar");
+    t && t.remove();
+    let e = document.querySelector("video");
+    e &&
+      (e.removeAttribute("autoplay-setup"),
+      e.removeAttribute("toolbar-created"),
+      e.removeAttribute("caption-setup"),
+      e.querySelectorAll("track").forEach((t) => {
+        t.remove();
+      })),
+      document.querySelectorAll("[vinegared]").forEach((t) => {
+        t.removeAttribute("vinegared");
+      });
+  }
 
-    // The C shortcut toggles captions without touching the mouse.
-    document.addEventListener("keydown", (event) => {
-        if (event.keyCode !== 67) return;
-        const target = event.target;
-        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
-        const video = document.querySelector("video");
-        if (!video) return;
-        toggleCaptions(video);
-    });
+  function d(t, e, a) {
+    let r = document.createElement("a");
+    return (
+      r.classList.add("button", e.toLowerCase()),
+      (r.textContent = e),
+      r.addEventListener("click", a),
+      t.appendChild(r),
+      r
+    );
+  }
 
-    boot.href = location.href;
-    boot();
+  function c(t) {
+    (e = t),
+      safari.extension.dispatchMessage("updateQuality", {
+        quality: t,
+      });
+  }
+
+  function u() {
+    let t = document.querySelector("video:not([toolbar-created])");
+    if (!t || !e) return;
+    let a = document.createElement("div");
+    a.id = "vinegar-toolbar";
+    let r = document.createElement("div");
+    r.classList.add("left"), a.appendChild(r);
+    let s = document.createElement("div");
+    s.classList.add("right"), a.appendChild(s);
+    let i,
+      o = d(r, "Quality", (i) => {
+        i.stopPropagation(),
+          i.preventDefault(),
+          !n ||
+            t.readyState < 4 ||
+            (r.classList.add("hidden"),
+            s.classList.add("hidden"),
+            (function (t, a) {
+              let r,
+                s,
+                i = document.querySelector(".ytp-settings-button");
+              i &&
+                (r = setInterval(() => {
+                  i.click();
+                  let o = document.querySelectorAll(
+                    ".ytp-settings-menu > .ytp-panel > .ytp-panel-menu > .ytp-menuitem",
+                  );
+                  if (o.length < 2) return;
+                  let l = o[o.length - 1];
+                  clearInterval(r),
+                    (s = setInterval(() => {
+                      l.click();
+                      let r = document.querySelectorAll(
+                        ".ytp-quality-menu .ytp-menuitem",
+                      );
+                      if (
+                        0 !== r.length &&
+                        (clearInterval(s),
+                        Array.from(r)
+                          .reverse()
+                          .forEach((t, r) => {
+                            let s = t.querySelector("span");
+                            if (!s) return;
+                            let n = Array.from(s.childNodes)
+                              .filter((t) => 3 === t.nodeType)
+                              .map((t) => t.nodeValue)
+                              .join("")
+                              .trim();
+                            0 === r && (n = "Auto");
+                            let i = n.toLowerCase().replace(/p60.*/, "p"),
+                              o = document.createElement("a");
+                            o.classList.add("button"),
+                              (o.textContent = n),
+                              o.setAttribute("data-quality", i),
+                              i === e && o.classList.add("active"),
+                              o.addEventListener("click", (e) => {
+                                e.stopPropagation(),
+                                  e.preventDefault(),
+                                  c(i),
+                                  t.click(),
+                                  a
+                                    .querySelectorAll("[data-quality]")
+                                    .forEach((t) => {
+                                      t.remove();
+                                    }),
+                                  (a.querySelector(".quality").textContent = n),
+                                  a
+                                    .querySelector(".left")
+                                    .classList.remove("hidden"),
+                                  a
+                                    .querySelector(".right")
+                                    .classList.remove("hidden");
+                              }),
+                              a.appendChild(o);
+                          }),
+                        n.audio)
+                      ) {
+                        let r = document.createElement("a");
+                        r.classList.add("button"),
+                          (r.textContent = "Audio"),
+                          r.setAttribute("data-quality", "audio"),
+                          "audio" === e && r.classList.add("active"),
+                          r.addEventListener("click", (e) => {
+                            e.stopPropagation(), e.preventDefault(), c("audio");
+                            let r = t.paused,
+                              s = t.currentTime;
+                            t.pause(),
+                              (t.src = n.audio.url),
+                              t.load(),
+                              t.addEventListener(
+                                "canplay",
+                                (e) => {
+                                  (t.currentTime = s), r || t.play();
+                                },
+                                {
+                                  once: !0,
+                                },
+                              ),
+                              a
+                                .querySelectorAll("[data-quality]")
+                                .forEach((t) => {
+                                  t.remove();
+                                }),
+                              (a.querySelector(".quality").textContent =
+                                "Audio"),
+                              a
+                                .querySelector(".left")
+                                .classList.remove("hidden"),
+                              a
+                                .querySelector(".right")
+                                .classList.remove("hidden");
+                          }),
+                          a.appendChild(r);
+                      }
+                    }, 100));
+                }, 100));
+            })(t, a));
+      });
+    (o.textContent = "Loading…"),
+      d(s, "Loop", (e) => {
+        e.stopPropagation(), e.preventDefault();
+        let a = e.target;
+        t.loop
+          ? ((t.loop = !1), a.classList.remove("active"))
+          : ((t.loop = !0), a.classList.add("active"));
+      }),
+      d(s, "Replay", (t) => {
+        t.stopPropagation(),
+          t.preventDefault(),
+          document.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              keyCode: 48,
+            }),
+          );
+      }),
+      d(s, "Theater", (t) => {
+        t.stopPropagation(),
+          t.preventDefault(),
+          document.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              keyCode: 84,
+            }),
+          );
+      }),
+      t.addEventListener("mousemove", (t) => {
+        clearTimeout(i),
+          s.classList.add("showing"),
+          s.classList.remove("removing"),
+          (i = setTimeout(() => {
+            s.classList.add("removing");
+          }, 3e3));
+      }),
+      t.addEventListener("mouseleave", (t) => {
+        clearTimeout(i),
+          (i = setTimeout(() => {
+            s.classList.remove("showing", "removing");
+          }, 100));
+      }),
+      s.addEventListener("mouseenter", (t) => {
+        clearTimeout(i),
+          s.classList.add("showing"),
+          s.classList.remove("removing");
+      }),
+      s.addEventListener("mouseleave", (t) => {
+        clearTimeout(i),
+          (i = setTimeout(() => {
+            s.classList.remove("showing", "removing");
+          }, 100));
+      }),
+      t.closest("div").insertBefore(a, t),
+      t.setAttribute("toolbar-created", !0);
+  }
+  (i.innerHTML =
+    '\n    (()=>{let e=new MutationObserver((e=>{e.forEach((e=>{let t=e.target;t.controls||(t.controls=!0)}))}));function t(e,r,o){for(let n in e)e.hasOwnProperty(n)&&(n===r?e[n]=o:"object"==typeof e[n]&&t(e[n],r,o))}function r(e,r){let o=JSON.parse;JSON.parse=(...n)=>{let d=o.apply(this,n);return t(d,e,r),d};let n=Response.prototype.json;Response.prototype.json=new Proxy(n,{apply(...o){let d=Reflect.apply(n,o[1],o[2]);return new Promise(((o,n)=>{d.then((n=>{t(n,e,r),o(n)})).catch((e=>n(e)))}))}})}function o(){let e=document.querySelectorAll("#contents > ytd-rich-item-renderer ytd-display-ad-renderer");0!==e.length&&e.forEach((e=>{if(e.parentNode&&e.parentNode.parentNode){let t=e.parentNode.parentNode;"YTD-RICH-ITEM-RENDERER"===t.tagName&&(t.style.display="none")}}))}function n(){if(!document.querySelector(".ad-showing"))return;let e=document.querySelectorAll("video");0!==e.length&&e.forEach((e=>{e.duration&&(e.currentTime=e.duration,setTimeout((()=>{let e=document.querySelector("button.ytp-ad-skip-button");e&&e.click()}),100))}))}function d(){let t=document.querySelector("video:not([vinegared-once])");if(!t)return;let r=t.closest("div");r&&r.setAttribute("vinegar-container",!0),t.controls=!0,e.observe(t,{attributes:!0,attributeFilter:["controls"]}),t.addEventListener("contextmenu",(e=>{e.stopPropagation()})),t.addEventListener("play",(e=>{let t=document.querySelector(".ytp-chrome-top");t&&t.classList.remove("paused")})),t.addEventListener("pause",(e=>{let t=document.querySelector(".ytp-chrome-top");t&&t.classList.add("paused")})),t.addEventListener("ended",(e=>{t.removeAttribute("vinegared")})),t.addEventListener("webkitfullscreenchange",(e=>{document.addEventListener("keydown",(e=>{document.webkitFullscreenElement&&"VIDEO"===document.webkitFullscreenElement.tagName&&32===e.keyCode&&(t.paused?t.play():t.pause())}))}),{once:!0}),t.setAttribute("vinegared",!0),t.setAttribute("vinegared-once",!0)}r("adPlacements",[]),r("playerAds",[]),o(),n(),d(),new MutationObserver((e=>{o(),n(),d()})).observe(document.documentElement,{childList:!0,subtree:!0});let a=document.createElement("style");(document.head||document.documentElement).prepend(a);let s=a.sheet;s.insertRule(\'#__ffYoutube1,#__ffYoutube2,#__ffYoutube3,#__ffYoutube4,#feed-pyv-container,#feedmodule-PRO,#homepage-chrome-side-promo,#merch-shelf,#offer-module,#pla-shelf > ytd-pla-shelf-renderer[class="style-scope ytd-watch"],#pla-shelf,#premium-yva,#promo-info,#promo-list,#promotion-shelf,#related > ytd-watch-next-secondary-results-renderer > #items > ytd-compact-promoted-video-renderer.ytd-watch-next-secondary-results-renderer,#search-pva,#shelf-pyv-container,#video-masthead,#watch-branded-actions,#watch-buy-urls,#watch-channel-brand-div,#watch7-branded-banner,#YtKevlarVisibilityIdentifier,#YtSparklesVisibilityIdentifier,.carousel-offer-url-container,.companion-ad-container,.GoogleActiveViewElement,.list-view[style="margin: 7px 0pt;"],.promoted-sparkles-text-search-root-container,.promoted-videos,.searchView.list-view,.sparkles-light-cta,.watch-extra-info-column,.watch-extra-info-right,.ytd-carousel-ad-renderer,.ytd-compact-promoted-video-renderer,.ytd-companion-slot-renderer,.ytd-merch-shelf-renderer,.ytd-player-legacy-desktop-watch-ads-renderer,.ytd-promoted-sparkles-text-search-renderer,.ytd-promoted-video-renderer,.ytd-search-pyv-renderer,.ytd-video-masthead-ad-v3-renderer,.ytp-ad-action-interstitial-background-container,.ytp-ad-action-interstitial-slot,.ytp-ad-image-overlay,.ytp-ad-overlay-container,.ytp-ad-progress,.ytp-ad-progress-list,[class*="ytd-display-ad-"],[layout*="display-ad-"],a[href^="http://www.youtube.com/cthru?"],a[href^="https://www.youtube.com/cthru?"],ytd-action-companion-ad-renderer,ytd-banner-promo-renderer,ytd-compact-promoted-video-renderer,ytd-companion-slot-renderer,ytd-display-ad-renderer,ytd-promoted-sparkles-text-search-renderer,ytd-promoted-sparkles-web-renderer,ytd-search-pyv-renderer,ytd-single-option-survey-renderer,ytd-video-masthead-ad-advertiser-info-renderer,ytd-video-masthead-ad-v3-renderer,YTM-PROMOTED-VIDEO-RENDERER{display:none !important;}\',s.cssRules.length)})();\n  '),
+    (document.head || document.documentElement).prepend(i),
+    setTimeout(() => {
+      i.remove();
+    }, 1e3),
+    safari.extension.dispatchMessage("refreshSettings"),
+    safari.self.addEventListener("message", (s) => {
+      if ("youtubeSuccess" === s.name) {
+        !(function (t) {
+          if (n) return;
+          let a, r, s;
+          (n = t),
+            (a = setInterval(() => {
+              let t = document.querySelector("video");
+              if (!t || t.readyState < 4) return;
+              let i = document.querySelector(".ytp-settings-button");
+              i &&
+                (clearInterval(a),
+                (r = setInterval(() => {
+                  i.click();
+                  let t = document.querySelectorAll(
+                    ".ytp-settings-menu > .ytp-panel > .ytp-panel-menu > .ytp-menuitem",
+                  );
+                  if (t.length < 2) return;
+                  let a = t[t.length - 1];
+                  clearInterval(r),
+                    (s = setInterval(() => {
+                      a.click();
+                      let t = document.querySelectorAll(
+                        ".ytp-quality-menu .ytp-menuitem",
+                      );
+                      if (0 === t.length) return;
+                      clearInterval(s);
+                      let r = document.querySelector(
+                        "#vinegar-toolbar .quality",
+                      );
+                      if ("audio" === e && n.audio) {
+                        i.click();
+                        let t = document.querySelector("video");
+                        (t.src = n.audio.url),
+                          t.load(),
+                          t.play(),
+                          (r.textContent = "Audio");
+                      } else {
+                        let a = !1;
+                        Array.from(t)
+                          .reverse()
+                          .forEach((t, s) => {
+                            let n = t.querySelector("span");
+                            if (!n) return;
+                            let i = Array.from(n.childNodes)
+                              .filter((t) => 3 === t.nodeType)
+                              .map((t) => t.nodeValue)
+                              .join("")
+                              .trim();
+                            0 === s && (i = "Auto");
+                            let o = i.toLowerCase().replace(/p60.*/, "p");
+                            o === e &&
+                              ((a = !0),
+                              t.click(),
+                              (r.textContent = `${o.charAt(0).toUpperCase()}${o.slice(1)}`));
+                          }),
+                          a ||
+                            ("best" === e
+                              ? (t[0].click(), (r.textContent = "Best"))
+                              : (t[t.length - 1].click(),
+                                (r.textContent = "Auto")));
+                      }
+                    }, 100));
+                }, 100)));
+            }, 100));
+        })(s.message.response);
+      } else if ("settings" === s.name) {
+        let n = s.message;
+        (t = n.autoplay),
+          (e = n.quality),
+          (a = n.showToolbar),
+          (r = n.subtitles);
+      }
+    }),
+    new MutationObserver((e) => {
+      l(),
+        (function () {
+          let e = document.querySelector("video:not([autoplay-setup])");
+          e &&
+            (e.addEventListener("play", (e) => {
+              let a = document.querySelector(
+                ".ytp-autonav-toggle-button:not([vinegared])",
+              );
+              if (!a) return;
+              let r = a.getAttribute("aria-checked");
+              t && "false" === r && a.click(),
+                t || "true" !== r || a.click(),
+                a.setAttribute("vinegared", !0);
+            }),
+            e.setAttribute("autoplay-setup", !0));
+        })(),
+        (function () {
+          let t = document.querySelector("#primary:not([vinegared])");
+          t &&
+            (a || t.setAttribute("notoolbar", !0),
+            t.setAttribute("vinegared", !0));
+        })(),
+        u(),
+        (function () {
+          let t,
+            e = document.querySelector("video:not([caption-setup])");
+          if (!e || !n) return;
+          if (e.querySelectorAll("track").length > 0 || !n.captions)
+            return void e.setAttribute("caption-setup", !0);
+          n.captions.forEach((t) => {
+            let a = document.createElement("track");
+            (a.label = t.name.runs[0].text),
+              (a.kind = "subtitles"),
+              (a.srclang = t.languageCode),
+              (a.src = `${t.baseUrl}&fmt=vtt`),
+              e.appendChild(a);
+          });
+          let a = "system" === r ? navigator.language : r,
+            s = n.captions.filter((t) => "en" === t.languageCode);
+          t = s.length > 0 ? s[0] : n.captions[0];
+          let i = document.createElement("track");
+          (i.label = `Auto-translated (${o(a)})`),
+            (i.kind = "subtitles"),
+            (i.srclang = a),
+            o(t.languageCode) === o(a)
+              ? (i.src = `${t.baseUrl}&fmt=vtt`)
+              : (i.src = `${t.baseUrl}&fmt=vtt&tlang=${a}`),
+            e.appendChild(i),
+            e.setAttribute("caption-setup", !0);
+        })();
+    }).observe(document.documentElement, {
+      childList: !0,
+      subtree: !0,
+    }),
+    document.addEventListener("keydown", (t) => {
+      if (67 === t.keyCode) {
+        let t,
+          e,
+          a = document.querySelector("video");
+        if (!a) return;
+        if (
+          "INPUT" === document.activeElement.tagName ||
+          "TEXTAREA" === document.activeElement.tagName ||
+          "true" === document.activeElement.getAttribute("contenteditable")
+        )
+          return;
+        Array.from(a.textTracks).forEach((a) => {
+          "showing" === a.mode && (t = a),
+            a.label.startsWith("Auto-translated") && (e = a);
+        }),
+          t ? (t.mode = "disabled") : (e.mode = "showing");
+      }
+    });
 })();
