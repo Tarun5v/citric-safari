@@ -104,14 +104,15 @@ Citric requests a minimal permission set:
 - `scripting` — reserved for programmatic reloads of the content script.
 
 There is no network permission, no remote code, no analytics. The extension
-behaves entirely inside the tab that loads `content.js`.
+behaves entirely inside the tab that loads `script.js`.
 
 ## Repository layout
 
 ```
 citric-safari/
 ├── manifest.json      # Manifest V3 configuration
-├── content.js         # Player replacement + SPA navigation handling
+├── script.js          # Player replacement + toolbar + captions handling
+├── style.css          # Player chrome cleanup and ad-cell hiding
 ├── icons/             # Lemon-slice icons at 16/32/128/256 px
 ├── LICENSE            # MIT
 └── README.md
@@ -120,17 +121,17 @@ citric-safari/
 ## Development
 
 - The content script is a single file with no dependencies. Edit
-  `content.js`, then reload the extension in **Extension Builder** and check
+  `script.js`, then reload the extension in **Extension Builder** and check
   the changes on a YouTube watch page.
 - Useful debugging tools:
-  - **Develop → Show Page Source** — confirm `content.js` loaded.
+  - **Develop → Show Page Source** — confirm `script.js` loaded.
   - **Develop → Start Debugging JavaScript** — follow `[citric]` console
     messages as the player swaps.
 
 ### Running a quick check
 
 ```sh
-node --check content.js   # syntax sanity check
+node --check script.js   # syntax sanity check
 ```
 
 ### Contribution guidelines
