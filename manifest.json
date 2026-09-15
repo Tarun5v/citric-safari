@@ -1,9 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Citric",
-  "version": "1.0.13",
-  "description": "A lightweight review-free YouTube player for macOS Safari.",
-  "permissions": ["activeTab", "scripting"],
+  "version": "1.0.14",
+  "description": "A clean, lightweight, open-source YouTube player for Safari, in the spirit of Vinegar.",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
   "content_scripts": [
     {
       "matches": [
@@ -11,7 +14,12 @@
         "https://youtube.com/*",
         "https://*.youtube.com/*"
       ],
-      "js": ["content.js"],
+      "css": [
+        "style.css"
+      ],
+      "js": [
+        "script.js"
+      ],
       "run_at": "document_start",
       "all_frames": false
     }
@@ -26,5 +34,9 @@
     "safari": {
       "strict_min_version": "16.0"
     }
-  }
+  },
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://youtube.com/*"
+  ]
 }
