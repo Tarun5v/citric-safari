@@ -8,7 +8,14 @@ Citric is a free, open-source alternative to paid YouTube clean-up tools. It
 does **not** block ads, alter recommendations, or touch your viewing history.
 It simply replaces the player chrome so the video renders natively.
 
----
+## Demo
+
+<img width="1100" height="758" alt="Citric-README-preview" src="https://github.com/user-attachments/assets/69dfb7f9-dae0-4b1f-906c-17923e3f8448" />
+
+
+https://github.com/user-attachments/assets/aa6b0cca-7e06-4e9e-8f40-8926ee31e3d7
+
+
 
 ## Why Citric?
 
