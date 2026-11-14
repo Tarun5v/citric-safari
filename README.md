@@ -1,153 +1,83 @@
 # Citric
+Citric is a Safari extension that gives YouTube watch pages a simpler video
+player. Click the picture to pause or resume. Move the pointer over the
+video to show the controls for seeking, volume, Picture in
+Picture, AirPlay, and fullscreen.
+## Why I built Citric
 
-A small, self-hosted Safari extension that swaps YouTube's heavy stock player
-for a lean native HTML5 `<video>` element. No accounts, no tracking, no
-clutter — just the video, playing directly in the browser.
-
-Citric is a free, open-source alternative to paid YouTube clean-up tools. It
-does **not** block ads, alter recommendations, or touch your viewing history.
-It simply replaces the player chrome so the video renders natively.
+YouTube ads were a big reason I started Citric. I wanted fewer interruptions when watching in Safari, and I didn’t want to pay for a subscription just for that. I started with the part I could change: the player interface. Citric gives me the video and the controls I use most, including Picture in Picture and AirPlay. When an ad plays and seeking is available, I can use Citric’s controls to skip ahead. The harder part was keeping playback working when YouTube switches videos or changes which streams it offers.
 
 ## Demo
-
 <img width="1100" height="758" alt="Citric-README-preview" src="https://github.com/user-attachments/assets/69dfb7f9-dae0-4b1f-906c-17923e3f8448" />
 
-
 https://github.com/user-attachments/assets/aa6b0cca-7e06-4e9e-8f40-8926ee31e3d7
+## Install Citric on macOS
 
+### Download and open the app
 
+1. Open the [latest Citric release](https://github.com/Tarun5v/citric-safari/releases/latest) and download the DMG under **Assets**.
+2. Open the DMG, drag **Citric** into **Applications**, then open it from **Applications**.
+3. If macOS shows **“Citric” Not Opened**, click **Done**. Only continue if you downloaded the DMG from this repository and trust the build.
 
-## Why Citric?
+   <img width="250" height="267" alt="macOS warning that Citric was not opened" src="https://github.com/user-attachments/assets/5d85d924-a12b-40bb-9a6c-d6206e32e0e7" />
 
-- **Lighter playback** — the stock YouTube player ships with a lot of logic,
-  telemetry hooks and UI chrome around the actual video. Citric strips it away
-  and plays the same stream in a plain `<video>` tag.
-- **Native controls** — playback sits on Safari's own media engine, so AirPlay,
-  Picture-in-Picture, keyboard controls and the system volume OSD just work.
-- **Hover-friendly playback** — a slim native-style bar (play, ±10s, seek,
-  volume, PiP, AirPlay, fullscreen) fades in on hover, and clicking anywhere on
-  the video toggles play/pause just like the stock player.
-- **Privately hosted** — install it straight from this repository. There is no
-  App Store fee, no review process, and no code executed server-side.
-- **SPA-friendly** — clicking through recommended videos never leaves a black
-  frame; the player resets cleanly on every client-side navigation.
+4. Open **System Settings → Privacy & Security**, scroll down to **Security**, and click **Open Anyway** next to the message that Citric was blocked.
 
-## How it works
+   <img width="420" height="153" alt="Open Anyway in Privacy & Security" src="https://github.com/user-attachments/assets/e7a52865-bb5b-4027-92fd-deb04fb9feda" />
 
-At `document_start`, Citric waits for YouTube's `#movie_player` container, then:
+5. In the **Open “Citric”?** dialog, click **Open Anyway** again. If macOS asks you to authenticate, use Touch ID or click **Use Password...** and enter your Mac administrator credentials.
 
-1. Pauses the underlying player and strips its DOM so it stops decoding and
-   reporting playback telemetry.
-2. Reads the current stream URL from `window.ytInitialPlayerResponse` (or the
-   rendered player's live response during later navigations).
-3. Injects a native `<video>` element with Safari-friendly attributes
-   (`playsinline`, `webkit-playsinline`, `x-webkit-airplay="allow"`).
-4. Listens for YouTube's `yt-navigate-finish` events and a
-   `MutationObserver` backstop, so the native player is re-created cleanly
-   whenever you click to another video without a full page reload.
+   <img width="520" height="359" alt="Open Citric confirmation dialog" src="https://github.com/user-attachments/assets/9ca7a911-4cce-4018-a5e2-6dd13aa34ce0" />
 
-The chosen stream is always a single progressive (muxed audio + video) format.
-Adaptive-only streams are left untouched — if YouTube only offers a
-separated-audio setup, Citric steps aside and the stock player takes over, so
-playback never breaks.
+   <img width="520" height="369" alt="macOS administrator authentication prompt" src="https://github.com/user-attachments/assets/d303b909-d5a4-4cdf-a93b-217a296b4765" />
 
-## Getting the code
+### Enable Citric in Safari
 
-```sh
-git clone https://github.com/<your-user>/citric-safari.git
-cd citric-safari
-```
+1. Open Citric if it hasn’t opened yet. In the **Enable Citric in Safari** window, click **Open Safari Extensions**.
 
-No build step is required. The extension is plain JavaScript + a manifest.
+   <img width="430" height="316" alt="Citric’s Open Safari Extensions button" src="https://github.com/user-attachments/assets/cd9adfa5-d986-4bae-ac4d-212d58432b6f" />
 
-## Installing in Safari
+2. Safari opens its **Extensions** settings. Switch to **Advanced** and select **Show features for web developers** at the bottom.
 
-These steps enable the Safari *Develop* menu and load the unpacked extension.
-They only need to be repeated when you pull updated code.
+   <img width="520" height="382" alt="Safari Extensions settings" src="https://github.com/user-attachments/assets/491fdb76-c9d8-42d9-8ae0-d448fbdf7264" />
 
-### 1. Enable the Develop menu
+   <img width="520" height="418" alt="Show features for web developers in Advanced settings" src="https://github.com/user-attachments/assets/7b93f0a8-d513-484b-8164-746109927875" />
 
-1. Open Safari.
-2. Choose **Safari → Settings** (or press <kbd>⌘</kbd><kbd>,</kbd>).
-3. Open the **Advanced** tab.
-4. Tick **"Show features for web developers"** at the bottom of the window.
+3. Open the new **Developer** tab. Under **Extensions**, select **Allow unsigned extensions** for this build.
 
-You should now see a **Develop** menu in the menu bar.
+   <img width="520" height="264" alt="Allow unsigned extensions in Developer settings" src="https://github.com/user-attachments/assets/fa8a3fa7-1023-480c-976c-2efd975b6fe6" />
+4. Return to **Extensions** and enable **Citric**. Open a YouTube watch page and allow Citric to access YouTube when Safari asks.
 
-> Some macOS releases call this option "Show Develop menu in menu bar". It is
-> the same checkbox.
+## Keyboard shortcuts
+You can press `K` or Space to pause and resume. Use `J` or `L` to jump
+10 seconds backward or forward. Press `M` to mute and `F` for fullscreen.
+## How playback works
+Citric looks for YouTube's `#movie_player` and adds its own controls in an
+overlay. When YouTube exposes a direct stream that contains both audio and
+video, Citric tries to play it in a separate HTML video element. If those streams don't load, Citric uses YouTube's existing video element and lets
+YouTube continue managing playback.
+YouTube can switch videos without reloading the page. Citric listens for
+`yt-navigate-finish` and watches for changes to the player. Before trying a
+direct stream, it checks that the player response matches the video ID in
+the URL.
+### What I learned building it
 
-### 2. Load Citric as a temporary extension
+- **Stream selection.** Some YouTube responses include a single URL with both audio and video. Others deliver them separately. I used the combined streams when available and kept YouTube’s own video element as the fallback. That let me change the interface without building a separate adaptive streaming player.
+- **Client-side navigation.** YouTube can reuse the same player container when you click a recommendation. The old player response can still be present after the URL changes. I check the video ID before using a response and watch for YouTube to replace its video element.
+- **Fullscreen in Safari.** The overlay could leave black strips when Safari entered fullscreen. I sized it with percentages in fullscreen and restored its in-page placement when fullscreen ended. Fullscreening the overlay also keeps Citric’s controls with the video.
 
-1. In Safari, choose **Develop → Show Extension Builder**.
-2. In the **Extension Builder** window, click the **+** button (bottom left)
-   and choose **Add Extension**.
-3. Select the `manifest.json` file inside the cloned `citric-safari` folder.
-4. Safari loads it under the name **Citric** (the vector icon shows a lemon
-   slice).
-5. Click **Install …** and confirm with **Install**.
-
-Citric is now active. Open any YouTube watch page and the player will render
-natively.
-
-> Temporary extensions stay installed until Safari quits. To keep Citric
-> installed across restarts, choose **File → Save** from the Extension Builder
-> menu bar once it is loaded — that pins it to your profile.
-
-### 3. Troubleshooting
-
-| Symptom | Likely cause | Fix |
-| --- | --- | --- |
-| Extension grayed out in Extension Builder | Internet Accounts / profiles conflict | Switch to the profile that owns Safari's settings, or toggle **Allow websites to check if Apple Pay, Extensions and AppleScript are available** in Develop settings |
-| Player unchanged on YouTube | YouTube served an adaptive-only stream | Nothing to do — Citric steps aside by design. Playback keeps working normally |
-| Native player appears but the page shows a black bar | The container height was read before layout | Refresh the page once; rate-limited route changes settle the layout |
-| No captions listed in the CC menu | Timedtext requires the `fmt=vtt` hint | Tracks are built lazily; re-open the CC picker after the video starts |
-
-## Permissions & privacy
-
-Citric requests a minimal permission set:
-
-- `activeTab` — used to attach to the active YouTube tab.
-- `scripting` — reserved for programmatic reloads of the content script.
-
-There is no network permission, no remote code, no analytics. The extension
-behaves entirely inside the tab that loads `content.js`.
-
-## Repository layout
-
-```
-citric-safari/
-├── manifest.json      # Manifest V3 configuration
-├── content.js         # Player replacement + SPA navigation handling
-├── icons/             # Lemon-slice icons at 16/32/128/256 px
-├── LICENSE            # MIT
-└── README.md
-```
-
+## Permissions and privacy
+The manifest declares `activeTab` and `scripting` and loads `content.js`
+on YouTube. Citric requires no account and includes no analytics code.
 ## Development
-
-- The content script is a single file with no dependencies. Edit
-  `content.js`, then reload the extension in **Extension Builder** and check
-  the changes on a YouTube watch page.
-- Useful debugging tools:
-  - **Develop → Show Page Source** — confirm `content.js` loaded.
-  - **Develop → Start Debugging JavaScript** — follow `[citric]` console
-    messages as the player swaps.
-
-### Running a quick check
-
+Edit `content.js` for player behavior, `manifest.json` for extension
+settings, and `icons/` for artwork. Check the script before reloading the
+extension in Safari:
 ```sh
-node --check content.js   # syntax sanity check
+node --check content.js
 ```
-
-### Contribution guidelines
-
-1. Fork the repository and work on a feature branch.
-2. Keep changes focused on playback reliability and Safari compatibility.
-3. Verify against a real YouTube watch page before opening a pull request.
-4. Mention whether your change touches the SPA navigation path — that's the
-   most sensitive area.
-
+If you've changed playback code, start with a fresh YouTube watch page.
+Then click a recommended video and check that the controls still work.
+In your pull request, mention which playback paths you've tested.
 ## License
-
-[MIT](./LICENSE) — do what you like, keep the copyright notice.
+Citric is available under the [MIT License](./LICENSE).
